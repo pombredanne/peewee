@@ -6,10 +6,26 @@
 peewee
 ======
 
-* a small orm
-* written in python
-* provides a lightweight querying interface over sql
-* uses sql concepts when querying, like joins and where clauses
+* a small, expressive orm
+* written in python (2.6+, 3.2+)
+
+.. image:: postgresql.png
+    :target: peewee/cookbook.html#using-with-postgresql
+    :alt: postgresql
+
+.. image:: mysql.png
+    :target: peewee/cookbook.html#using-with-mysql
+    :alt: mysql
+
+.. image:: sqlite.png
+    :target: peewee/cookbook.html#using-with-sqlite
+    :alt: sqlite
+
+`Code hosted on GitHub <https://github.com/coleifer/peewee>`_.
+
+New to peewee? Check out the `getting started IPython notebook <http://nbviewer.ipython.org/d3faf30bbff67ce5f70c>`_.
+
+See notes on :ref:`notes on upgrading and changes from 1.0 <upgrading>`
 
 Contents:
 ---------
@@ -17,15 +33,25 @@ Contents:
 .. toctree::
    :maxdepth: 2
    :glob:
-   
-   peewee/overview
+
    peewee/installation
-   peewee/uses
+   peewee/quickstart
    peewee/example
+   peewee/cookbook
    peewee/models
-   peewee/fields
    peewee/querying
    peewee/database
+   peewee/api
+   peewee/playhouse
+   peewee/upgrading
+
+Note
+----
+
+Hi, I'm Charlie the author of peewee.  I hope that you enjoy using this library
+as much as I've enjoyed writing it.  Peewee wouldn't be anywhere near as useful
+without people like you, so thank you.  If you find any bugs, odd behavior, or
+have an idea for a new feature please don't hesitate to `open an issue <https://github.com/coleifer/peewee/issues?state=open>`_ on GitHub.
 
 Indices and tables
 ==================
@@ -33,4 +59,3 @@ Indices and tables
 * :ref:`genindex`
 * :ref:`modindex`
 * :ref:`search`
-

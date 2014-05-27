@@ -1,7 +1,9 @@
 import datetime
 import os
 
-from models import User, Blog, Entry
+from models import Blog
+from models import Entry
+from models import User
 
 
 def initialize():
@@ -30,6 +32,10 @@ def list_users(ordered=False):
         qs = User.objects.all().order_by('username')
     else:
         qs = User.objects.all()
+    return list(qs)
+
+def list_blogs_select_related():
+    qs = Blog.objects.all().select_related('user')
     return list(qs)
 
 def list_blogs_for_user(user):

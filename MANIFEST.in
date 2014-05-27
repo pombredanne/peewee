@@ -1,5 +1,8 @@
+include CHANGELOG.md
 include LICENSE
 include README.rst
 include TODO.rst
-recursive-include example *
+include runtests.py
+include tests.py
+recursive-include examples *
 recursive-include docs *
