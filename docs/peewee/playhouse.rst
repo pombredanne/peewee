@@ -13,6 +13,7 @@ specific functionality:
 * :ref:`apsw`
 * :ref:`postgres_ext`
 * :ref:`sqlite_ext`
+* :ref:`berkeleydb`
 * :ref:`sqlcipher_ext`
 
 Modules which expose higher-level python constructs:
@@ -31,6 +32,7 @@ As well as tools for working with databases:
 * :ref:`read_slaves`
 * :ref:`pool`
 * :ref:`test_utils`
+* :ref:`pskel`
 
 
 .. _apsw:
@@ -125,7 +127,6 @@ currently:
 * :py:class:`ArrayField` field type, for storing arrays.
 * :py:class:`HStoreField` field type, for storing key/value pairs.
 * :py:class:`JSONField` field type, for storing JSON data.
-* :py:class:`UUIDField` field type, for storing UUID objects.
 * :py:class:`DateTimeTZ` field type, a timezone-aware datetime field.
 
 In the future I would like to add support for more of postgresql's features.
@@ -387,7 +388,6 @@ postgres_ext API notes
     * :py:class:`DateTimeTZField`
     * :py:class:`JSONField`
     * :py:class:`HStoreField`
-    * :py:class:`UUIDField`
 
     :param str database: Name of database to connect to.
     :param bool server_side_cursors: Whether ``SELECT`` queries should utilize
@@ -415,6 +415,8 @@ postgres_ext API notes
             pass
 
         # At this point server side resources are released.
+
+.. _pgarrays:
 
 .. py:class:: ArrayField([field_class=IntegerField[, dimensions=1]])
 
@@ -641,10 +643,6 @@ postgres_ext API notes
             APIResponse.response['key1']['nested-key'] == 'some-value')
 
 
-.. py:class:: UUIDField(*args, **kwargs)
-
-    A field for storing and retrieving ``UUID`` objects.
-
 .. _sqlite_ext:
 
 Sqlite Extensions
@@ -778,6 +776,7 @@ sqlite_ext API notes
 
     .. py:attribute:: _extension = 'name of sqlite extension'
 
+.. _sqlite_fts:
 
 .. py:class:: FTSModel
 
@@ -1006,6 +1005,51 @@ sqlite_ext API notes
 
     .. note:: BM25 only works with FTS4 tables.
 
+.. _berkeleydb:
+
+BerkeleyDB backend
+------------------
+
+BerkeleyDB provides a `SQLite-compatible API <http://www.oracle.com/technetwork/database/database-technologies/berkeleydb/overview/sql-160887.html>`_. BerkeleyDB's SQL API has many advantages over SQLite:
+
+* Higher transactions-per-second in multi-threaded environments.
+* Built-in replication and hot backup.
+* Fewer system calls, less resource utilization.
+* Multi-version concurrency control.
+
+For more details, Oracle has published a short `technical overview <http://www.oracle.com/technetwork/database/berkeleydb/learnmore/bdbvssqlite-wp-186779.pdf>`_.
+
+In order to use peewee with BerkeleyDB, you need to compile BerkeleyDB with the SQL API enabled. Then compile the Python SQLite driver against BerkeleyDB's sqlite replacement.
+
+Begin by downloading and compiling BerkeleyDB:
+
+.. code-block:: console
+
+    wget http://download.oracle.com/berkeley-db/db-6.0.30.tar.gz
+    tar xzf db-6.0.30.tar.gz
+    cd db-6.0.30/build_unix
+    export CFLAGS='-DSQLITE_ENABLE_FTS3=1 -DSQLITE_ENABLE_RTREE=1 -fPIC'
+    ../dist/configure --enable-static --disable-shared --enable-sql --enable-sql-compat
+    make
+    sudo make prefix=/usr/local/ install
+
+Then get a copy of the standard library SQLite driver and build it against BerkeleyDB:
+
+.. code-block:: console
+
+    git clone https://github.com/ghaering/pysqlite
+    cd pysqlite
+    sed -i "s|#||g" setup.cfg
+    python setup.py build
+    sudo python setup.py install
+
+To simplify this process, peewee comes with a script that will automatically build the appropriate libraries for you. The ``berkeley_build.sh`` script can be found in the ``playhouse`` directory (or you can `view the source online <https://github.com/coleifer/peewee/blob/master/playhouse/berkeley_build.sh>`_).
+
+You can also find `step by step instructions <http://charlesleifer.com/blog/building-the-python-sqlite-driver-for-use-with-berkeleydb/>`_ on my blog.
+
+.. py:class:: BerkeleyDatabase(database, **kwargs)
+
+    Subclass of the :py:class:`SqliteExtDatabase` that supports connecting to BerkeleyDB-backed version of SQLite.
 
 .. _sqlcipher_ext:
 
@@ -2040,6 +2084,12 @@ when instantiating your database, then up to `max_connections` will be opened.
 
     Subclass of :py:class:`PostgresqlDatabase` that mixes in the :py:class:`PooledDatabase` helper.
 
+.. py:class:: PooledPostgresqlExtDatabase
+
+    Subclass of :py:class:`PostgresqlExtDatabase` that mixes in the :py:class:`PooledDatabase` helper. The :py:class:`PostgresqlExtDatabase` is a part of the
+    :ref:`postgres_ext` module and provides support for many Postgres-specific
+    features.
+
 .. py:class:: PooledMySQLDatabase
 
     Subclass of :py:class:`MySQLDatabase` that mixes in the :py:class:`PooledDatabase` helper.
@@ -2150,3 +2200,108 @@ Contains utilities helpful when testing peewee projects.
                     self.assertEqual(Tweet.timeline('user-0') [...])
 
                 # once we exit the context manager, we're back to using the normal database
+
+
+.. py:class:: count_queries([only_select=False])
+
+    Context manager that will count the number of queries executed within
+    the context.
+
+    :param bool only_select: Only count *SELECT* queries.
+
+    .. code-block:: python
+
+        with count_queries() as counter:
+            huey = User.get(User.username == 'huey')
+            huey_tweets = [tweet.message for tweet in huey.tweets]
+
+        assert counter.count == 2
+
+    .. py:attribute:: count
+
+        The number of queries executed.
+
+    .. py:method:: get_queries()
+
+        Return a list of 2-tuples consisting of the SQL query and a list of
+        parameters.
+
+
+.. py:function:: assert_query_count(expected[, only_select=False])
+
+    Function or method decorator that will raise an ``AssertionError`` if the
+    number of queries executed in the decorated function does not equal the
+    expected number.
+
+    .. code-block:: python
+
+        class TestMyApp(unittest.TestCase):
+            @assert_query_count(1)
+            def test_get_popular_blogs(self):
+                popular_blogs = Blog.get_popular()
+                self.assertEqual(
+                    [blog.title for blog in popular_blogs],
+                    ["Peewee's Playhouse!", "All About Huey", "Mickey's Adventures"])
+
+    This function can also be used as a context manager:
+
+    .. code-block:: python
+
+        class TestMyApp(unittest.TestCase):
+            def test_expensive_operation(self):
+                with assert_query_count(1):
+                    perform_expensive_operation()
+
+.. _pskel:
+
+pskel
+-----
+
+I often find myself writing very small scripts with peewee. *pskel* will generate the boilerplate code for a basic peewee script.
+
+Usage::
+
+    pskel [options] model1 model2 ...
+
+*pskel* accepts the following options:
+
+================   =============  =======================================
+Option             Default        Description
+================   =============  =======================================
+``-l,--logging``   False          Log all queries to stdout.
+``-e,--engine``    sqlite         Database driver to use.
+``-d,--database``  ``:memory:``   Database to connect to.
+================   =============  =======================================
+
+Example::
+
+    $ pskel -e postgres -d my_database User Tweet
+
+This will print the following code to *stdout* (which you can redirect into a file using ``>``):
+
+.. code-block:: python
+
+    #!/usr/bin/env python
+
+    import logging
+
+    from peewee import *
+    from peewee import create_model_tables
+
+    db = PostgresqlDatabase('my_database')
+
+    class BaseModel(Model):
+        class Meta:
+            database = db
+
+    class User(BaseModel):
+        pass
+
+    class Tweet(BaseModel):
+        pass
+
+    def main():
+        create_model_tables([User, Tweet], fail_silently=True)
+
+    if __name__ == '__main__':
+        main()
