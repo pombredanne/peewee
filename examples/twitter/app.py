@@ -22,7 +22,7 @@ app.config.from_object(__name__)
 
 # create a peewee database instance -- our models will use this database to
 # persist information
-database = SqliteDatabase(DATABASE, threadlocals=True)
+database = SqliteDatabase(DATABASE)
 
 # model definitions -- the standard "pattern" is to define a base model class
 # that specifies which database to use.  then, any subclasses will automatically
@@ -150,9 +150,8 @@ def get_object_or_404(model, *expressions):
 def is_following(from_user, to_user):
     return from_user.is_following(to_user)
 
-# request handlers -- these two hooks are provided by flask and we will use them
-# to create and tear down a database connection on each request.  peewee will do
-# this for us, but its generally a good idea to be explicit.
+# Request handlers -- these two hooks are provided by flask and we will use them
+# to create and tear down a database connection on each request.
 @app.before_request
 def before_request():
     g.db = database
@@ -197,7 +196,7 @@ def join():
                 # unique constraint, the database will raise an IntegrityError.
                 user = User.create(
                     username=request.form['username'],
-                    password=md5(request.form['password']).hexdigest(),
+                    password=md5((request.form['password']).encode('utf-8')).hexdigest(),
                     email=request.form['email'],
                     join_date=datetime.datetime.now())
 
@@ -216,7 +215,7 @@ def login():
         try:
             user = User.get(
                 username=request.form['username'],
-                password=md5(request.form['password']).hexdigest())
+                password=md5((request.form['password']).encode('utf-8')).hexdigest())
         except User.DoesNotExist:
             flash('The password entered is incorrect')
         else:

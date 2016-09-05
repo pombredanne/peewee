@@ -3,7 +3,7 @@
 Example app
 ===========
 
-We'll be building a simple *twitter*-like site. The source code for the example can be found in the ``examples/twitter`` directory. You can also `browse the source-code <https://github.com/coleifer/peewee/tree/master/examples/twitter>`_ on github.
+We'll be building a simple *twitter*-like site. The source code for the example can be found in the ``examples/twitter`` directory. You can also `browse the source-code <https://github.com/coleifer/peewee/tree/master/examples/twitter>`_ on github. There is also an example `blog app <https://github.com/coleifer/peewee/tree/master/examples/blog>`_ if that's more to your liking.
 
 The example app uses the `flask <http://flask.pocoo.org/>`_ web framework which is very easy to get started with. If you don't have flask already, you will need to install it to run the example:
 
@@ -28,6 +28,8 @@ Diving into the code
 --------------------
 
 For simplicity all example code is contained within a single module, ``examples/twitter/app.py``. For a guide on structuring larger Flask apps with peewee, check out `Structuring Flask Apps <http://charlesleifer.com/blog/structuring-flask-apps-a-how-to-for-those-coming-from-django/>`_.
+
+.. _example-app-models:
 
 Models
 ^^^^^^
@@ -140,7 +142,7 @@ following:
     was not found and may not be installed correctly. Check the :ref:`installation`
     document for instructions on installing peewee.
 
-Every model has a :py:meth:`~Model.create_table` classmethod which runs a SQL *CREATE TABLE* statement in the database. This method will create the table, including all columns, foreign-key constaints, indexes, and sequences. Usually this is something you'll only do once, whenever a new model is added.
+Every model has a :py:meth:`~Model.create_table` classmethod which runs a SQL *CREATE TABLE* statement in the database. This method will create the table, including all columns, foreign-key constraints, indexes, and sequences. Usually this is something you'll only do once, whenever a new model is added.
 
 Peewee provides a helper method :py:meth:`Database.create_tables` which will resolve inter-model dependencies and call :py:meth:`~Model.create_table` on each model.
 
@@ -170,25 +172,23 @@ This is a peewee idiom:
     # execute queries
     database = SqliteDatabase(DATABASE, threadlocals=True)
 
-Because SQLite likes to have a separate connection per-thread, we will tell flask that during the request/response cycle we need to create a connection to the database. Flask provides some handy decorators to make this a snap:
+When developing a web application, it's common to open a connection when a request starts, and close it when the response is returned. **You should always manage your connections explicitly**. For instance, if you are using a :ref:`connection pool <pool>`, connections will only be recycled correctly if you call :py:meth:`~Database.connect` and :py:meth:`~Database.close`.
+
+We will tell flask that during the request/response cycle we need to create a connection to the database. Flask provides some handy decorators to make this a snap:
 
 .. code-block:: python
 
     @app.before_request
     def before_request():
-        g.db = database
-        g.db.connect()
-
+        database.connect()
+       
     @app.after_request
     def after_request(response):
-        g.db.close()
+        database.close()
         return response
 
 .. note::
-    We're storing the db on the magical variable ``g`` - that's a
-    flask-ism and can be ignored as an implementation detail. The important
-    takeaway is that we connect to our db every request and close that connection
-    when we return a response.
+    Peewee uses thread local storage to manage connection state, so this pattern can be used with multi-threaded WSGI servers.
 
 
 Making queries
@@ -329,6 +329,15 @@ There are a couple other neat things going on in the example app that are worth 
               return model.get(*expressions)
           except model.DoesNotExist:
               abort(404)
+
+More examples
+-------------
+
+There are more examples included in the peewee `examples directory <https://github.com/coleifer/peewee/blob/master/examples/>`_, including:
+
+* `Example blog app <https://github.com/coleifer/peewee/tree/master/examples/blog>`_ using Flask and peewee. Also see `accompanying blog post <http://charlesleifer.com/blog/how-to-make-a-flask-blog-in-one-hour-or-less/>`_.
+* `An encrypted command-line diary <https://github.com/coleifer/peewee/blob/master/examples/diary.py>`_. There is a `companion blog post <http://charlesleifer.com/blog/dear-diary-an-encrypted-command-line-diary-with-python/>`_ you might enjoy as well.
+* `Analytics web-service <https://github.com/coleifer/peewee/tree/master/examples/analytics>`_ (like a lite version of Google Analytics). Also check out the `companion blog post <http://charlesleifer.com/blog/saturday-morning-hacks-building-an-analytics-app-with-flask/>`_.
 
 .. note::
     Like these snippets and interested in more?  Check out `flask-peewee <https://github.com/coleifer/flask-peewee>`_ -

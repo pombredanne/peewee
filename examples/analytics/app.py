@@ -51,8 +51,7 @@ app.config.from_object(__name__)
 
 database = PostgresqlExtDatabase(
     DATABASE_NAME,
-    user='postgres',
-    threadlocals=True)
+    user='postgres')
 
 class BaseModel(Model):
     class Meta:
@@ -126,6 +125,18 @@ def script():
 @app.errorhandler(404)
 def not_found(e):
     return Response('<h3>Not found.</h3>')
+
+# Request handlers -- these two hooks are provided by flask and we will use them
+# to create and tear down a database connection on each request.
+@app.before_request
+def before_request():
+    g.db = database
+    g.db.connect()
+
+@app.after_request
+def after_request(response):
+    g.db.close()
+    return response
 
 
 if __name__ == '__main__':

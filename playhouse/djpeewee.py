@@ -21,7 +21,7 @@ class DjangoTranslator(object):
         return [
             (djf.AutoField, PrimaryKeyField),
             (djf.BigIntegerField, BigIntegerField),
-            #(djf.BinaryField, BlobField),
+            # (djf.BinaryField, BlobField),
             (djf.BooleanField, BooleanField),
             (djf.CharField, CharField),
             (djf.DateTimeField, DateTimeField),  # Extends DateField.
@@ -88,7 +88,7 @@ class DjangoTranslator(object):
                         logger.warn('Cycle detected: %s: %s',
                                     model_field.name, model_name)
                         attrs[model_field.name] = IntegerField(
-                            db_column=model_field.get_attname())
+                            db_column=model_field.column)
                     else:
                         related_name = (model_field.rel.related_name or
                                         model_field.related_query_name())
@@ -100,14 +100,17 @@ class DjangoTranslator(object):
 
                         attrs[model_field.name] = ForeignKeyField(
                             mapping[model_name],
-                            related_name=related_name)
+                            related_name=related_name,
+                            db_column=model_field.column,
+                        )
 
                 else:
                     attrs[model_field.name] = IntegerField(
-                        db_column=model_field.get_attname())
+                        db_column=model_field.column)
 
             elif converted:
-                attrs[model_field.name] = converted()
+                attrs[model_field.name] = converted(
+                    db_column=model_field.db_column)
 
         klass = type(options.object_name, (Model,), attrs)
         klass._meta.db_table = options.db_table
@@ -116,11 +119,19 @@ class DjangoTranslator(object):
 
         if backrefs:
             # Follow back-references for foreign keys.
-            for rel_obj in options.get_all_related_objects():
-                if rel_obj.model._meta.object_name in mapping:
+            try:
+                all_related = [(f, f.model) for f in
+                               options.get_all_related_objects()]
+            except AttributeError:
+                all_related = [(f, f.field.model) for f in options.get_fields()
+                               if (f.one_to_many or f.one_to_one)
+                               and f.auto_created and not f.concrete]
+
+            for rel_obj, model in all_related:
+                if model._meta.object_name in mapping:
                     continue
                 self._translate_model(
-                    rel_obj.model,
+                    model,
                     mapping,
                     max_depth=max_depth - 1,
                     backrefs=backrefs,
@@ -140,8 +151,8 @@ class DjangoTranslator(object):
 
     def translate_models(self, *models, **options):
         """
-        Generate a group of peewee models analagous to the provided Django models
-        for the purposes of creating queries.
+        Generate a group of peewee models analagous to the provided Django
+        models for the purposes of creating queries.
 
         :param model: A Django model class.
         :param options: A dictionary of options, see note below.
@@ -163,7 +174,10 @@ class DjangoTranslator(object):
             # Generate query using peewee.
             PUser = peewee['User']
             PAccount = peewee['Account']
-            query = PUser.select().join(PAccount).where(PAccount.acct_type == 'foo')
+            query = (PUser
+                     .select()
+                     .join(PAccount)
+                     .where(PAccount.acct_type == 'foo'))
 
             # Django raw query.
             users = User.objects.raw(*query.sql())

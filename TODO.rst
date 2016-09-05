@@ -1,10 +1,17 @@
 todo
 ====
 
-* Join and .join() are very model-centric, but *should* be able to accept an
-  arbitrary single-source (table or select).
+* Database column defaults?
+* Pre-compute foreign keys, attributes and join types (forward-ref or backref) in the `AggregateQueryResultWrapper.iterate` method.
+* Improve the performance of the `QueryCompiler`.
 
-Queries to support?
+version 3?
+==========
 
-* create index <myidx> on table (some_col COLLATE NOCASE ASC) where foo > 3
-* create (temp) [table/view] <tblname> as select ...
+* Follow foreign keys through fields, e.g. Tweet.user.username, or Comment.blog.user.username.
+* Simplify the node types:
+  * Node (base class)
+  * Expression
+  * Quoted
+  * Clause
+* Parsing should be context-aware, which would reduce some of the hacks, particularly around `IN` + lists.

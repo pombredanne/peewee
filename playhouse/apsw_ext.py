@@ -1,7 +1,7 @@
 """
 Peewee integration with APSW, "another python sqlite wrapper".
 
-Project page: https://code.google.com/p/apsw/
+Project page: https://rogerbinns.github.io/apsw/
 
 APSW is a really neat library that provides a thin wrapper on top of SQLite's
 C interface.
@@ -20,51 +20,21 @@ import apsw
 from peewee import *
 from peewee import _sqlite_date_part
 from peewee import _sqlite_date_trunc
+from peewee import _sqlite_regexp
 from peewee import BooleanField as _BooleanField
 from peewee import DateField as _DateField
 from peewee import DateTimeField as _DateTimeField
 from peewee import DecimalField as _DecimalField
 from peewee import logger
-from peewee import PY3
+from peewee import savepoint
 from peewee import TimeField as _TimeField
 from peewee import transaction as _transaction
-
-
-class ConnectionWrapper(apsw.Connection):
-    def cursor(self):
-        base_cursor = super(ConnectionWrapper, self).cursor()
-        return CursorProxy(base_cursor)
-
-
-class CursorProxy(object):
-    def __init__(self, cursor_obj):
-        self.cursor_obj = cursor_obj
-        self.implements = set(['description', 'fetchone'])
-
-    def __getattr__(self, attr):
-        if attr in self.implements:
-            return self.__getattribute__(attr)
-        return getattr(self.cursor_obj, attr)
-
-    @property
-    def description(self):
-        try:
-            return self.cursor_obj.getdescription()
-        except apsw.ExecutionCompleteError:
-            return []
-
-    if PY3:
-        def fetchone(self):
-            try:
-                return next(self.cursor_obj)
-            except StopIteration:
-                pass
-    else:
-        def fetchone(self):
-            try:
-                return self.cursor_obj.next()
-            except StopIteration:
-                pass
+from playhouse.sqlite_ext import SqliteExtDatabase
+from playhouse.sqlite_ext import VirtualCharField
+from playhouse.sqlite_ext import VirtualField
+from playhouse.sqlite_ext import VirtualFloatField
+from playhouse.sqlite_ext import VirtualIntegerField
+from playhouse.sqlite_ext import VirtualModel
 
 
 class transaction(_transaction):
@@ -76,7 +46,7 @@ class transaction(_transaction):
         self.db.begin(self.lock_type)
 
 
-class APSWDatabase(SqliteDatabase):
+class APSWDatabase(SqliteExtDatabase):
     def __init__(self, database, timeout=None, **kwargs):
         self.timeout = timeout
         self._modules = {}
@@ -89,38 +59,66 @@ class APSWDatabase(SqliteDatabase):
         del(self._modules[mod_name])
 
     def _connect(self, database, **kwargs):
-        conn = ConnectionWrapper(database, **kwargs)
+        conn = apsw.Connection(database, **kwargs)
         if self.timeout is not None:
             conn.setbusytimeout(self.timeout)
-        conn.createscalarfunction('date_part', _sqlite_date_part, 2)
-        conn.createscalarfunction('date_trunc', _sqlite_date_trunc, 2)
+        try:
+            self._add_conn_hooks(conn)
+        except:
+            conn.close()
+            raise
+        return conn
+
+    def _add_conn_hooks(self, conn):
+        super(APSWDatabase, self)._add_conn_hooks(conn)
+        self._load_modules(conn)  # APSW-only.
+
+    def _load_modules(self, conn):
         for mod_name, mod_inst in self._modules.items():
             conn.createmodule(mod_name, mod_inst)
         return conn
+
+    def _load_aggregates(self, conn):
+        for name, (klass, num_params) in self._aggregates.items():
+            def make_aggregate():
+                instance = klass()
+                return (instance, instance.step, instance.finalize)
+            conn.createaggregatefunction(name, make_aggregate)
+
+    def _load_collations(self, conn):
+        for name, fn in self._collations.items():
+            conn.createcollation(name, fn)
+
+    def _load_functions(self, conn):
+        for name, (fn, num_params) in self._functions.items():
+            conn.createscalarfunction(name, fn, num_params)
+
+    def _load_extensions(self, conn):
+        conn.enableloadextension(True)
+        for extension in self._extensions:
+            conn.loadextension(extension)
+
+    def load_extension(self, extension):
+        self._extensions.add(extension)
+        if not self.is_closed():
+            conn = self.get_conn()
+            conn.enableloadextension(True)
+            conn.loadextension(extension)
 
     def _execute_sql(self, cursor, sql, params):
         cursor.execute(sql, params or ())
         return cursor
 
     def execute_sql(self, sql, params=None, require_commit=True):
-        cursor = self.get_cursor()
-        wrap_transaction = require_commit and self.get_autocommit()
-        if wrap_transaction:
-            cursor.execute('begin;')
-            try:
-                self._execute_sql(cursor, sql, params)
-            except:
-                cursor.execute('rollback;')
-                raise
-            else:
-                cursor.execute('commit;')
-        else:
-            cursor = self._execute_sql(cursor, sql, params)
         logger.debug((sql, params))
+        with self.exception_wrapper():
+            cursor = self.get_cursor()
+            self._execute_sql(cursor, sql, params)
         return cursor
 
     def last_insert_id(self, cursor, model):
-        return cursor.getconnection().last_insert_rowid()
+        if model._meta.auto_increment:
+            return cursor.getconnection().last_insert_rowid()
 
     def rows_affected(self, cursor):
         return cursor.getconnection().changes()
@@ -136,6 +134,9 @@ class APSWDatabase(SqliteDatabase):
 
     def transaction(self, lock_type='deferred'):
         return transaction(self, lock_type)
+
+    def savepoint(self, sid=None):
+        return savepoint(self, sid)
 
 
 def nh(s, v):

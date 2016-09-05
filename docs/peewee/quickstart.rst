@@ -21,7 +21,17 @@ I **strongly** recommend opening an interactive shell session and running the co
 Model Definition
 -----------------
 
-Each Model class maps directly to a database table, and each field maps to a column on that table. Each model instance corresponds to a row in the table.
+Model classes, fields and model instances all map to database concepts:
+
+================= =================================
+Thing             Corresponds to...
+================= =================================
+Model class       Database table
+Field instance    Column on a table
+Model instance    Row in a database table
+================= =================================
+
+When starting to a project with peewee, it's typically best to begin with your data model, by defining one or more :py:class:`Model` classes:
 
 .. code-block:: python
 
@@ -37,9 +47,12 @@ Each Model class maps directly to a database table, and each field maps to a col
         class Meta:
             database = db # This model uses the "people.db" database.
 
+.. note::
+    Note that we named our model ``Person`` instead of ``People``. This is a convention you should follow -- even though the table will contain multiple people, we always name the class using the singular form.
+
 There are lots of :ref:`field types <fields>` suitable for storing various types of data. Peewee handles converting between *pythonic* values those used by the database, so you can use Python types in your code without having to worry.
 
-Things get interesting when we set up relationships between models using foreign keys. This is easy to do with peewee:
+Things get interesting when we set up relationships between models using `foreign keys (wikipedia) <http://en.wikipedia.org/wiki/Foreign_key>`_. This is easy to do with peewee:
 
 .. code-block:: python
 
@@ -49,9 +62,15 @@ Things get interesting when we set up relationships between models using foreign
         animal_type = CharField()
 
         class Meta:
-            database = db # this model uses the people database
+            database = db # this model uses the "people.db" database
 
-Now that we have our models, let's create the tables in the database that will store our data. This will create the tables with the appropriate columns, indexes, sequences, and foreign key constraints:
+Now that we have our models, let's connect to the database. Although it's not necessary to open the connection explicitly, it is good practice since it will reveal any errors with your database connection immediately, as opposed to some arbitrary time later when the first query is executed. It is also good to close the connection when you are done -- for instance, a web app might open a connection when it receives a request, and close the connection when it sends the response.
+
+.. code-block:: pycon
+
+    >>> db.connect()
+
+We'll begin by creating the tables in the database that will store our data. This will create the tables with the appropriate columns, indexes, sequences, and foreign key constraints:
 
 .. code-block:: pycon
 
@@ -209,11 +228,11 @@ Let's list all the people now, youngest to oldest:
 .. code-block:: pycon
 
     >>> for person in Person.select().order_by(Person.birthday.desc()):
-    ...     print person.name
+    ...     print person.name, person.birthday
     ...
-    Bob
-    Herb
-    Grandma L.
+    Bob 1960-01-15
+    Herb 1950-05-05
+    Grandma L. 1935-03-01
 
 Now let's list all the people *and* some info about their pets:
 
@@ -235,10 +254,10 @@ Once again we've run into a classic example of :ref:`N+1 <nplusone>` query behav
 
 .. code-block:: pycon
 
-    >>> subquery = Pet.select(fn.COUNT(Pet.id)).where(Pet.owner == Person.id).
+    >>> subquery = Pet.select(fn.COUNT(Pet.id)).where(Pet.owner == Person.id)
     >>> query = (Person
     ...          .select(Person, Pet, subquery.alias('pet_count'))
-    ...          .join(Pet, JOIN_LEFT_OUTER)
+    ...          .join(Pet, JOIN.LEFT_OUTER)
     ...          .order_by(Person.name))
 
     >>> for person in query.aggregate_rows():  # Note the `aggregate_rows()` call.
@@ -253,7 +272,7 @@ Once again we've run into a classic example of :ref:`N+1 <nplusone>` query behav
     Herb 1 pets
          Mittens Jr cat
 
-Even thought we created the subquery separately, **only one** query is actually executed.
+Even though we created the subquery separately, **only one** query is actually executed.
 
 Finally, let's do a complicated one. Let's get all the people whose birthday was
 either:
@@ -270,10 +289,10 @@ either:
     ...          .where((Person.birthday < d1940) | (Person.birthday > d1960)))
     ...
     >>> for person in query:
-    ...     print person.name
+    ...     print person.name, person.birthday
     ...
-    Bob
-    Grandma L.
+    Bob 1960-01-15
+    Grandma L. 1935-03-01
 
 Now let's do the opposite. People whose birthday is between 1940 and 1960:
 
@@ -284,9 +303,9 @@ Now let's do the opposite. People whose birthday is between 1940 and 1960:
     ...          .where((Person.birthday > d1940) & (Person.birthday < d1960)))
     ...
     >>> for person in query:
-    ...     print person.name
+    ...     print person.name, person.birthday
     ...
-    Herb
+    Herb 1950-05-05
 
 One last query. This will use a SQL function to find all people whose names start with either an upper or lower-case *G*:
 
@@ -297,6 +316,12 @@ One last query. This will use a SQL function to find all people whose names star
     ...     print person.name
     ...
     Grandma L.
+
+We're done with our database, let's close the connection:
+
+.. code-block:: pycon
+
+    >>> db.close()
 
 This is just the basics! You can make your queries as complex as you like.
 
@@ -315,7 +340,7 @@ If you already have a database, you can autogenerate peewee models using :ref:`p
 
 .. code-block:: console
 
-    pwiz.py -e postgresql charles_blog > blog_models.py
+    python -m pwiz -e postgresql charles_blog > blog_models.py
 
 What next?
 ----------

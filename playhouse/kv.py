@@ -1,29 +1,33 @@
-from base64 import b64decode
-from base64 import b64encode
-import itertools
 import operator
 import pickle
+try:
+    import simplejson as json
+except ImportError:
+    import json
+
 from peewee import *
 from peewee import Node
+from playhouse.fields import PickledField
 
 try:
     from playhouse.apsw_ext import APSWDatabase
-    def KeyValueDatabase(db_name):
-        return APSWDatabase(db_name)
+    def KeyValueDatabase(db_name, **kwargs):
+        return APSWDatabase(db_name, **kwargs)
 except ImportError:
-    def KeyValueDatabase(db_name):
-        return SqliteDatabase(db_name, check_same_thread=False)
+    def KeyValueDatabase(db_name, **kwargs):
+        return SqliteDatabase(db_name, check_same_thread=False, **kwargs)
 
 Sentinel = type('Sentinel', (object,), {})
 
-key_value_db = KeyValueDatabase(':memory:')
+key_value_db = KeyValueDatabase(':memory:', threadlocals=False)
 
-class PickleField(BlobField):
+class JSONField(TextField):
     def db_value(self, value):
-        return b64encode(pickle.dumps(value))
+        return json.dumps(value)
 
     def python_value(self, value):
-        return pickle.loads(b64decode(value))
+        if value is not None:
+            return json.loads(value)
 
 class KeyStore(object):
     """
@@ -147,4 +151,11 @@ class KeyStore(object):
 
 class PickledKeyStore(KeyStore):
     def __init__(self, ordered=False, database=None):
-        super(PickledKeyStore, self).__init__(PickleField(), ordered, database)
+        super(PickledKeyStore, self).__init__(
+            PickledField(), ordered, database)
+
+
+class JSONKeyStore(KeyStore):
+    def __init__(self, ordered=False, database=None):
+        field = JSONField(null=True)
+        super(JSONKeyStore, self).__init__(field, ordered, database)

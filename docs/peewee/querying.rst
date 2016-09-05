@@ -88,12 +88,12 @@ The above approach is slow for a couple of reasons:
 3. That's a lot of data (in terms of raw bytes of SQL) you are sending to your database to parse.
 4. We are retrieving the *last insert id*, which causes an additional query to be executed in some cases.
 
-You can get a **very significant speedup** by simply wrapping this in a :py:meth:`~Database.transaction`.
+You can get a **very significant speedup** by simply wrapping this in a :py:meth:`~Database.atomic`.
 
 .. code-block:: python
 
     # This is much faster.
-    with db.transaction():
+    with db.atomic():
         for data_dict in data_source:
             Model.create(**data_dict)
 
@@ -102,17 +102,24 @@ The above code still suffers from points 2, 3 and 4. We can get another big boos
 .. code-block:: python
 
     # Fastest.
-    with db.transaction():
+    with db.atomic():
         Model.insert_many(data_source).execute()
 
 Depending on the number of rows in your data source, you may need to break it up into chunks:
 
 .. code-block:: python
 
-    # Insert rows 1000 at a time.
-    with db.transaction():
-        for idx in range(0, len(data_source), 1000):
-            Model.insert_many(data_source[idx:idx+1000]).execute()
+    # Insert rows 100 at a time.
+    with db.atomic():
+        for idx in range(0, len(data_source), 100):
+            Model.insert_many(data_source[idx:idx+100]).execute()
+
+.. note::
+    SQLite users should be aware of some caveats when using bulk inserts.
+    Specifically, your SQLite3 version must be 3.7.11.0 or newer to take
+    advantage of the bulk insert API. Additionally, by default SQLite limits
+    the number of bound variables in a SQL query to ``999``. This value can be
+    modified by setting the ``SQLITE_MAX_VARIABLE_NUMBER`` flag.
 
 If the data you would like to bulk load is stored in another table, you can also create *INSERT* queries whose source is a *SELECT* query. Use the :py:meth:`Model.insert_from` method:
 
@@ -179,7 +186,7 @@ Instead, you can update the counters atomically using :py:meth:`~Model.update`:
 .. code-block:: pycon
 
     >>> query = Stat.update(counter=Stat.counter + 1).where(Stat.url == request.url)
-    >>> query.update()
+    >>> query.execute()
 
 You can make these update statements as complex as you like. Let's give all our employees a bonus equal to their previous bonus plus 10% of their salary:
 
@@ -267,21 +274,54 @@ For more information, see the documentation on:
 * :py:meth:`Model.select`
 * :py:meth:`SelectQuery.get`
 
-Get or create
+Create or get
 -------------
 
-While peewee has a :py:meth:`~Model.get_or_create` method, this should really not be used outside of tests as it is vulnerable to a race condition. The proper way to perform a *get or create* with peewee is to rely on the database to enforce a constraint.
+Peewee has two methods for performing "get/create" type operations:
+
+* :py:meth:`Model.create_or_get`, which will attempt to create a new row. If an ``IntegrityError`` occurs indicating the violation of a constraint, then Peewee will attempt to get the object instead.
+* :py:meth:`Model.get_or_create`, which first attempts to retrieve the matching row. Failing that, a new row will be created.
 
 Let's say we wish to implement registering a new user account using the :ref:`example User model <blog-models>`. The *User* model has a *unique* constraint on the username field, so we will rely on the database's integrity guarantees to ensure we don't end up with duplicate usernames:
 
 .. code-block:: python
 
     try:
-        with db.transaction():
-            user = User.create(username=username)
-        return 'Success'
+        with db.atomic():
+            return User.create(username=username)
     except peewee.IntegrityError:
-        return 'Failure: %s is already in use' % username
+        # `username` is a unique column, so this username already exists,
+        # making it safe to call .get().
+        return User.get(User.username == username)
+
+Rather than writing all this code, you can instead call either :py:meth:`~Model.create_or_get`:
+
+.. code-block:: python
+
+    user, created = User.create_or_get(username=username)
+
+The above example first attempts at creation, then falls back to retrieval, relying on the database to enforce a unique constraint.
+
+If you prefer to attempt to retrieve the record first, you can use :py:meth:`~Model.get_or_create`. This method is implemented along the same lines as the Django function of the same name. You can use the Django-style keyword argument filters to specify your ``WHERE`` conditions. The function returns a 2-tuple containing the instance and a boolean value indicating if the object was created.
+
+Here is how you might implement user account creation using :py:meth:`~Model.get_or_create`:
+
+.. code-block:: python
+
+    user, created = User.get_or_create(username=username)
+
+Suppose we have a different model ``Person`` and would like to get or create a person object. The only conditions we care about when retrieving the ``Person`` are their first and last names, **but** if we end up needing to create a new record, we will also specify their date-of-birth and favorite color:
+
+.. code-block:: python
+
+    person, created = Person.get_or_create(
+        first_name=first_name,
+        last_name=last_name,
+        defaults={'dob': dob, 'favorite_color': 'green'})
+
+Any keyword argument passed to :py:meth:`~Model.get_or_create` will be used in the ``get()`` portion of the logic, except for the ``defaults`` dictionary, which will be used to populate values on newly-created instances.
+
+For more details check out the documentation for :py:meth:`Model.create_or_get` and :py:meth:`Model.get_or_create`.
 
 Selecting multiple records
 --------------------------
@@ -336,7 +376,7 @@ You can filter for particular records using normal python operators. Peewee supp
 
     >>> user = User.get(User.username == 'Charlie')
     >>> for tweet in Tweet.select().where(Tweet.user == user, Tweet.is_published == True):
-    ...     print '%s: %s (%s)' % (tweet.user.username, tweet.message)
+    ...     print '%s: %s' % (tweet.user.username, tweet.message)
     ...
     Charlie: hello world
     Charlie: this is fun
@@ -443,6 +483,18 @@ To return rows in order, use the :py:meth:`~SelectQuery.order_by` method:
     2011-06-07 14:08:48
     2010-01-01 00:00:00
 
+You can also use ``+`` and ``-`` prefix operators to indicate ordering:
+
+.. code-block:: python
+
+    # The following queries are equivalent:
+    Tweet.select().order_by(Tweet.created_date.desc())
+
+    Tweet.select().order_by(-Tweet.created_date)  # Note the "-" prefix.
+
+    # Similarly you can use "+" to indicate ascending order:
+    User.select().order_by(+User.username)
+
 You can also order across joins. Assuming you want to order tweets by the username of the author, then by created_date:
 
 .. code-block:: pycon
@@ -456,6 +508,38 @@ You can also order across joins. Assuming you want to order tweets by the userna
     INNER JOIN "user" AS t2
       ON t1."user_id" = t2."id"
     ORDER BY t2."username", t1."created_date" DESC
+
+When sorting on a calculated value, you can either include the necessary SQL expressions, or reference the alias assigned to the value. Here are two examples illustrating these methods:
+
+.. code-block:: python
+
+    # Let's start with our base query. We want to get all usernames and the number of
+    # tweets they've made. We wish to sort this list from users with most tweets to
+    # users with fewest tweets.
+    query = (User
+             .select(User.username, fn.COUNT(Tweet.id).alias('num_tweets'))
+             .join(Tweet, JOIN.LEFT_OUTER)
+             .group_by(User.username))
+
+You can order using the same COUNT expression used in the ``select`` clause. In the example below we are ordering by the ``COUNT()`` of tweet ids descending:
+
+.. code-block:: python
+
+    query = (User
+             .select(User.username, fn.COUNT(Tweet.id).alias('num_tweets'))
+             .join(Tweet, JOIN.LEFT_OUTER)
+             .group_by(User.username)
+             .order_by(fn.COUNT(Tweet.id).desc()))
+
+Alternatively, you can reference the alias assigned to the calculated value in the ``select`` clause. This method has the benefit of being a bit easier to read. Note that we are not referring to the named alias directly, but are wrapping it using the :py:class:`SQL` helper:
+
+.. code-block:: python
+
+    query = (User
+             .select(User.username, fn.COUNT(Tweet.id).alias('num_tweets'))
+             .join(Tweet, JOIN.LEFT_OUTER)
+             .group_by(User.username)
+             .order_by(SQL('num_tweets').desc()))
 
 Getting random records
 ----------------------
@@ -540,7 +624,8 @@ The resulting query will return *User* objects with all their normal attributes 
 
     query = (User
              .select()
-             .join(Tweet, JOIN_LEFT_OUTER)
+             .join(Tweet, JOIN.LEFT_OUTER)
+             .switch(User)
              .annotate(Tweet))
 
 You can also specify a custom aggregator, such as *MIN* or *MAX*:
@@ -671,6 +756,30 @@ Example:
     for person in Person.raw('select * from person'):
         print person.name  # .raw() will return model instances.
 
+Security and SQL Injection
+--------------------------
+
+By default peewee will parameterize queries, so any parameters passed in by the user will be escaped. The only exception to this rule is if you are writing a raw SQL query or are passing in a ``SQL`` object which may contain untrusted data. To mitigate this, ensure that any user-defined data is passed in as a query parameter and not part of the actual SQL query:
+
+.. code-block:: python
+
+    # Bad!
+    query = MyModel.raw('SELECT * FROM my_table WHERE data = %s' % (user_data,))
+
+    # Good. `user_data` will be treated as a parameter to the query.
+    query = MyModel.raw('SELECT * FROM my_table WHERE data = %s', user_data)
+
+    # Bad!
+    query = MyModel.select().where(SQL('Some SQL expression %s' % user_data))
+
+    # Good. `user_data` will be treated as a parameter.
+    query = MyModel.select().where(SQL('Some SQL expression %s', user_data))
+
+.. note::
+    MySQL and Postgresql use ``'%s'`` to denote parameters. SQLite, on the other hand, uses ``'?'``. Be sure to use the character appropriate to your database. You can also find this parameter by checking :py:attr:`Database.interpolation`.
+
+.. _window-functions:
+
 Window functions
 ----------------
 
@@ -721,6 +830,37 @@ Similarly, you can return the rows from the cursor as dictionaries using :py:met
     for stat in stats:
         print stat['url'], stat['ct']
 
+.. _returning-clause:
+
+Returning Clause
+----------------
+
+:py:class:`PostgresqlDatabase` supports a ``RETURNING`` clause on ``UPDATE``, ``INSERT`` and ``DELETE`` queries. Specifying a ``RETURNING`` clause allows you to iterate over the rows accessed by the query.
+
+For example, let's say you have an :py:class:`UpdateQuery` that deactivates all user accounts whose registration has expired. After deactivating them, you want to send each user an email letting them know their account was deactivated. Rather than writing two queries, a ``SELECT`` and an ``UPDATE``, you can do this in a single ``UPDATE`` query with a ``RETURNING`` clause:
+
+.. code-block:: python
+
+    query = (User
+             .update(is_active=False)
+             .where(User.registration_expired == True)
+             .returning(User))
+
+    # Send an email to every user that was deactivated.
+    for deactivate_user in query.execute():
+        send_deactivation_email(deactivated_user)
+
+The ``RETURNING`` clause is also available on :py:class:`InsertQuery` and :py:class:`DeleteQuery`. When used with ``INSERT``, the newly-created rows will be returned. When used with ``DELETE``, the deleted rows will be returned.
+
+The only limitation of the ``RETURNING`` clause is that it can only consist of columns from tables listed in the query's ``FROM`` clause. To select all columns from a particular table, you can simply pass in the :py:class:`Model` class.
+
+For more information, see:
+
+* :py:meth:`UpdateQuery.returning`
+* :py:meth:`InsertQuery.returning`
+* :py:meth:`DeleteQuery.returning`
+
+
 .. _query-operators:
 
 Query operators
@@ -741,6 +881,7 @@ Comparison       Meaning
 ``>>``           x IS y, where y is None/NULL
 ``%``            x LIKE y where y may contain wildcards
 ``**``           x ILIKE y where y may contain wildcards
+``~``            Negation
 ================ =======================================
 
 Because I ran out of operators to override, there are some additional query operations available as methods:
@@ -756,13 +897,29 @@ Method                  Meaning
 ``.bin_and(value)``     Binary AND.
 ``.bin_or(value)``      Binary OR.
 ``.in_(value)``         IN lookup (identical to ``<<``).
+``.not_in(value)``      NOT IN lookup.
+``.is_null(is_null)``   IS NULL or IS NOT NULL. Accepts boolean param.
+``.concat(other)``      Concatenate two strings using ``||``.
 ======================= ===============================================
+
+To combine clauses using logical operators, use:
+
+================ ==================== ======================================================
+Operator         Meaning              Example
+================ ==================== ======================================================
+``&``            AND                  ``(User.is_active == True) & (User.is_admin == True)``
+``|`` (pipe)     OR                   ``(User.is_admin) | (User.is_superuser)``
+``~``            NOT (unary negation) ``~(User.username << ['foo', 'bar', 'baz'])``
+================ ==================== ======================================================
 
 Here is how you might use some of these query operators:
 
 .. code-block:: python
 
+    # Find the user whose username is "charlie".
     User.select().where(User.username == 'charlie')
+
+    # Find the users whose username is in [charlie, huey, mickey]
     User.select().where(User.username << ['charlie', 'huey', 'mickey'])
 
     Employee.select().where(Employee.salary.between(50000, 60000))
@@ -771,12 +928,113 @@ Here is how you might use some of these query operators:
 
     Blog.select().where(Blog.title.contains(search_string))
 
+Here is how you might combine expressions. Comparisons can be arbitrarily
+complex.
+
 .. note::
-    Because SQLite's ``LIKE`` operation is case-insensitive by default,
-    peewee will use the SQLite ``GLOB`` operation for case-sensitive searches.
-    The glob operation uses asterisks for wildcards as opposed to the usual
-    percent-sign.  If you are using SQLite and want case-sensitive partial
-    string matching, remember to use asterisks for the wildcard.
+  Note that the actual comparisons are wrapped in parentheses. Python's operator
+  precedence necessitates that comparisons be wrapped in parentheses.
+
+.. code-block:: python
+
+    # Find any users who are active administrations.
+    User.select().where(
+      (User.is_admin == True) &
+      (User.is_active == True))
+
+    # Find any users who are either administrators or super-users.
+    User.select().where(
+      (User.is_admin == True) |
+      (User.is_superuser == True))
+
+    # Find any Tweets by users who are not admins (NOT IN).
+    admins = User.select().where(User.is_admin == True)
+    non_admin_tweets = Tweet.select().where(
+      ~(Tweet.user << admins))
+
+    # Find any users who are not my friends (strangers).
+    friends = User.select().where(
+      User.username << ['charlie', 'huey', 'mickey'])
+    strangers = User.select().where(~(User.id << friends))
+
+.. warning::
+    Although you may be tempted to use python's ``in``, ``and``, ``or`` and
+    ``not`` operators in your query expressions, these **will not work.** The
+    return value of an ``in`` expression is always coerced to a boolean value.
+    Similarly, ``and``, ``or`` and ``not`` all treat their arguments as boolean
+    values and cannot be overloaded.
+
+    So just remember:
+
+    * Use ``<<`` instead of ``in``
+    * Use ``&`` instead of ``and``
+    * Use ``|`` instead of ``or``
+    * Use ``~`` instead of ``not``
+    * Don't forget to wrap your comparisons in parentheses when using logical
+      operators.
+
+For more examples, see the :ref:`expressions` section.
+
+.. note::
+  **LIKE and ILIKE with SQLite**
+
+  Because SQLite's ``LIKE`` operation is case-insensitive by default,
+  peewee will use the SQLite ``GLOB`` operation for case-sensitive searches.
+  The glob operation uses asterisks for wildcards as opposed to the usual
+  percent-sign. If you are using SQLite and want case-sensitive partial
+  string matching, remember to use asterisks for the wildcard.
+
+Three valued logic
+------------------
+
+Because of the way SQL handles ``NULL``, there are some special operations available for expressing:
+
+* ``IS NULL``
+* ``IS NOT NULL``
+* ``IN``
+* ``NOT IN``
+
+While it would be possible to use the ``IS NULL`` and ``IN`` operators with the negation operator (``~``), sometimes to get the correct semantics you will need to explicitly use ``IS NOT NULL`` and ``NOT IN``.
+
+The simplest way to use ``IS NULL`` and ``IN`` is to use the operator overloads:
+
+.. code-block:: python
+
+    # Get all User objects whose last login is NULL.
+    User.select().where(User.last_login >> None)
+
+    # Get users whose username is in the given list.
+    usernames = ['charlie', 'huey', 'mickey']
+    User.select().where(User.username << usernames)
+
+If you don't like operator overloads, you can call the Field methods instead:
+
+.. code-block:: python
+
+    # Get all User objects whose last login is NULL.
+    User.select().where(User.last_login.is_null(True))
+
+    # Get users whose username is in the given list.
+    usernames = ['charlie', 'huey', 'mickey']
+    User.select().where(User.username.in_(usernames))
+
+To negate the above queries, you can use unary negation, but for the correct semantics you may need to use the special ``IS NOT`` and ``NOT IN`` operators:
+
+.. code-block:: python
+
+    # Get all User objects whose last login is *NOT* NULL.
+    User.select().where(User.last_login.is_null(False))
+
+    # Using unary negation instead.
+    User.select().where(~(User.last_login >> None))
+
+    # Get users whose username is *NOT* in the given list.
+    usernames = ['charlie', 'huey', 'mickey']
+    User.select().where(User.username.not_in(usernames))
+
+    # Using unary negation instead.
+    usernames = ['charlie', 'huey', 'mickey']
+    User.select().where(~(User.username << usernames))
 
 .. _custom-operators:
 
@@ -792,12 +1050,12 @@ Here is how you might add support for ``modulo`` in SQLite:
     from peewee import *
     from peewee import Expression # the building block for expressions
 
-    OP_MOD = 'mod'
+    OP['MOD'] = 'mod'
 
     def mod(lhs, rhs):
-        return Expression(lhs, OP_MOD, rhs)
+        return Expression(lhs, OP.MOD, rhs)
 
-    SqliteDatabase.register_ops({OP_MOD: '%'})
+    SqliteDatabase.register_ops({OP.MOD: '%'})
 
 Now you can use these custom operators to build richer queries:
 
@@ -807,6 +1065,8 @@ Now you can use these custom operators to build richer queries:
     User.select().where(mod(User.id, 2) == 0)
 
 For more examples check out the source to the ``playhouse.postgresql_ext`` module, as it contains numerous operators specific to postgresql's hstore.
+
+.. _expressions:
 
 Expressions
 -----------
@@ -882,7 +1142,7 @@ Foreign Keys
 
 Foreign keys are created using a special field class :py:class:`ForeignKeyField`. Each foreign key also creates a back-reference on the related model using the specified *related_name*.
 
-Traversing foriegn keys
+Traversing foreign keys
 -----------------------
 
 Referring back to the :ref:`User and Tweet models <blog-models>`, note that there is a :py:class:`ForeignKeyField` from *Tweet* to *User*. The foreign key can be traversed, allowing you access to the associated user instance:
@@ -926,15 +1186,57 @@ By default peewee will use an *INNER* join, but you can use *LEFT OUTER* or *FUL
 
     users = (User
              .select(User, fn.Count(Tweet.id).alias('num_tweets'))
-             .join(Tweet, JOIN_LEFT_OUTER)
+             .join(Tweet, JOIN.LEFT_OUTER)
              .group_by(User)
              .order_by(fn.Count(Tweet.id).desc()))
     for user in users:
         print user.username, 'has created', user.num_tweets, 'tweet(s).'
 
-If a foreign key does not exist between two tables you can still perform a join, but you must manually specify the join condition.
+Multiple Foreign Keys to the Same Model
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-.. note:: By specifying an alias on the join condition, you can control the attribute peewee will assign the joined instance to.
+When there are multiple foreign keys to the same model, it is good practice to explicitly specify which field you are joining on.
+
+Referring back to the :ref:`example app's models <example-app-models>`, consider the *Relationship* model, which is used to denote when one user follows another. Here is the model definition:
+
+.. code-block:: python
+
+    class Relationship(BaseModel):
+        from_user = ForeignKeyField(User, related_name='relationships')
+        to_user = ForeignKeyField(User, related_name='related_to')
+
+        class Meta:
+            indexes = (
+                # Specify a unique multi-column index on from/to-user.
+                (('from_user', 'to_user'), True),
+            )
+
+Since there are two foreign keys to *User*, we should always specify which field we are using in a join.
+
+For example, to determine which users I am following, I would write:
+
+.. code-block:: python
+
+    (User
+    .select()
+    .join(Relationship, on=Relationship.to_user)
+    .where(Relationship.from_user == charlie))
+
+On the other hand, if I wanted to determine which users are following me, I would instead join on the *from_user* column and filter on the relationship's *to_user*:
+
+.. code-block:: python
+
+    (User
+    .select()
+    .join(Relationship, on=Relationship.from_user)
+    .where(Relationship.to_user == charlie))
+
+Joining on arbitrary fields
+^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+If a foreign key does not exist between two tables you can still perform a join, but you must manually specify the join predicate.
+
+In the following example, there is no explicit foreign-key between *User* and *ActivityLog*, but there is an implied relationship between the *ActivityLog.object_id* field and *User.id*. Rather than joining on a specific :py:class:`Field`, we will join using an :py:class:`Expression`.
 
 .. code-block:: python
 
@@ -957,11 +1259,28 @@ If a foreign key does not exist between two tables you can still perform a join,
     charlie posted a tweet
     charlie logged out
 
+.. note::
+    By specifying an alias on the join condition, you can control the attribute peewee will assign the joined instance to. In the previous example, we used the following *join*:
+
+    .. code-block:: python
+
+        (User.id == ActivityLog.object_id).alias('log')
+
+    Then when iterating over the query, we were able to directly access the joined *ActivityLog* without incurring an additional query:
+
+    .. code-block:: python
+
+        for user in user_log:
+            print user.username, user.log.description
+
+Joining on Multiple Tables
+^^^^^^^^^^^^^^^^^^^^^^^^^^
+
 When calling :py:meth:`~Query.join`, peewee will use the *last joined table* as the source table. For example:
 
 .. code-block:: python
 
-    User.join(Tweet).join(Comment)
+    User.select().join(Tweet).join(Comment)
 
 This query will result in a join from *User* to *Tweet*, and another join from *Tweet* to *Comment*.
 
@@ -970,7 +1289,7 @@ If you would like to join the same table twice, use the :py:meth:`~Query.switch`
 .. code-block:: python
 
     # Join the Artist table on both `Ablum` and `Genre`.
-    Artist.join(Album).switch(Artist).join(Genre)
+    Artist.select().join(Album).switch(Artist).join(Genre)
 
 .. _manytomany:
 
@@ -1021,11 +1340,11 @@ To efficiently iterate over a many-to-many relation, i.e., list all students and
 .. code-block:: python
 
     query = (StudentCourse
-        .select(StudentCourse, Student, Course)
-        .join(Course)
-        .switch(StudentCourse)
-        .join(Student)
-        .order_by(Student.name))
+             .select(StudentCourse, Student, Course)
+             .join(Course)
+             .switch(StudentCourse)
+             .join(Student)
+             .order_by(Student.name))
 
 To print a list of students and their courses you might do the following:
 
@@ -1039,9 +1358,75 @@ To print a list of students and their courses you might do the following:
             print 'Student: %s' % student.name
         print '    - %s' % student_course.course.name
 
-Since we selected all fields from ``Student`` and ``Course`` in the *select*
-clause of the query, these foreign key traversals are "free" and we've done the
-whole iteration with just 1 query.
+Since we selected all fields from ``Student`` and ``Course`` in the *select* clause of the query, these foreign key traversals are "free" and we've done the whole iteration with just 1 query.
+
+ManyToManyField
+^^^^^^^^^^^^^^^
+
+The :py:class:`ManyToManyField` provides a *field-like* API over many-to-many fields. For all but the simplest many-to-many situations, you're better off using the standard peewee APIs. But, if your models are very simple and your querying needs are not very complex, you can get a big boost by using :py:class:`ManyToManyField`. Check out the :ref:`extra-fields` extension module for details.
+
+Modeling students and courses using :py:class:`ManyToManyField`:
+
+.. code-block:: python
+
+    from peewee import *
+    from playhouse.fields import ManyToManyField
+
+    db = SqliteDatabase('school.db')
+
+    class BaseModel(Model):
+        class Meta:
+            database = db
+
+    class Student(BaseModel):
+        name = CharField()
+
+    class Course(BaseModel):
+        name = CharField()
+        students = ManyToManyField(Student, related_name='courses')
+
+    StudentCourse = Course.students.get_through_model()
+
+    db.create_tables([
+        Student,
+        Course,
+        StudentCourse])
+
+    # Get all classes that "huey" is enrolled in:
+    huey = Student.get(Student.name == 'Huey')
+    for course in huey.courses.order_by(Course.name):
+        print course.name
+
+    # Get all students in "English 101":
+    engl_101 = Course.get(Course.name == 'English 101')
+    for student in engl_101.students:
+        print student.name
+
+    # When adding objects to a many-to-many relationship, we can pass
+    # in either a single model instance, a list of models, or even a
+    # query of models:
+    huey.courses.add(Course.select().where(Course.name.contains('English')))
+
+    engl_101.students.add(Student.get(Student.name == 'Mickey'))
+    engl_101.students.add([
+        Student.get(Student.name == 'Charlie'),
+        Student.get(Student.name == 'Zaizee')])
+
+    # The same rules apply for removing items from a many-to-many:
+    huey.courses.remove(Course.select().where(Course.name.startswith('CS')))
+
+    engl_101.students.remove(huey)
+
+    # Calling .clear() will remove all associated objects:
+    cs_150.students.clear()
+
+For more examples, see:
+
+* :py:meth:`ManyToManyField.add`
+* :py:meth:`ManyToManyField.remove`
+* :py:meth:`ManyToManyField.clear`
+* :py:meth:`ManyToManyField.get_through_model`
+
 
 Self-joins
 ----------
@@ -1120,6 +1505,9 @@ The term *N+1 queries* refers to a situation where an application performs a que
 
 Peewee provides several APIs for mitigating *N+1* query behavior. Recollecting the models used throughout this document, *User* and *Tweet*, this section will try to outline some common *N+1* scenarios, and how peewee can help you avoid them.
 
+.. note::
+    In some cases, N+1 queries will not result in a significant or measurable performance hit. It all depends on the data you are querying, the database you are using, and the latency involved in executing queries and retrieving results. As always when making optimizations, profile before and after to ensure the changes do what you expect them to.
+
 List recent tweets
 ^^^^^^^^^^^^^^^^^^
 
@@ -1155,56 +1543,17 @@ This situation is similar to the previous example, but there is one important di
 
 Peewee provides two approaches to avoiding *O(n)* queries in this situation. We can either:
 
-* Fetch both users and tweets in a single query. User data will be duplicated, so peewee will de-dupe it and aggregate the tweets as it iterates through the result set.
-* Fetch users first, then fetch all the tweets associated with those users. Once peewee has the big list of tweets, it will assign them out, matching them with the appropriate user.
+* Fetch users first, then fetch all the tweets associated with those users. Once peewee has the big list of tweets, it will assign them out, matching them with the appropriate user. This method is usually faster but will involve a query for each table being selected.
+* Fetch both users and tweets in a single query. User data will be duplicated, so peewee will de-dupe it and aggregate the tweets as it iterates through the result set. This method involves a lot of data being transferred over the wire and a lot of logic in Python to de-duplicate rows.
 
 Each solution has its place and, depending on the size and shape of the data you are querying, one may be more performant than the other.
 
-Let's look at the first approach, since it is more general and can work with arbitrarily complex queries. We will use a special flag, :py:meth:`~SelectQuery.aggregate_rows`, when creating our query. This method tells peewee to de-duplicate any rows that, due to the structure of the JOINs, may be duplicated.
-
-.. code-block:: python
-
-    query = (User
-             .select(User, Tweet)  # As in the previous example, we select both tables.
-             .join(Tweet, JOIN_LEFT_OUTER)
-             .order_by(User.username)  # We need to specify an ordering here.
-             .aggregate_rows())  # Tell peewee to de-dupe and aggregate results.
-
-    for user in query:
-        print user.username
-        for tweet in user.tweets:
-            print '  ', tweet.message
-
-Ordinarily, ``user.tweets`` would be a :py:class:`SelectQuery` and iterating over it would trigger an additional query. By using :py:meth:`~SelectQuery.aggregate_rows`, though, ``user.tweets`` is a Python ``list`` and no additional query occurs.
-
-.. note::
-    We used a *LEFT OUTER* join to ensure that users with zero tweets would
-    also be included in the result set.
-
-Below is an example of how we might fetch several users and any tweets they created within the past week. Because we are filtering the tweets and the user may not have any tweets, we need our *WHERE* clause to allow *NULL* tweet IDs.
-
-.. code-block:: python
-
-    week_ago = datetime.date.today() - datetime.timedelta(days=7)
-    query = (User
-             .select(User, Tweet)
-             .join(Tweet, JOIN_LEFT_OUTER)
-             .where(
-                 (Tweet.id >> None) | (
-                     (Tweet.is_published == True) &
-                     (Tweet.created_date >= week_ago)))
-             .order_by(User.username, Tweet.created_date.desc())
-             .aggregate_rows())
-
-    for user in query:
-        print user.username
-        for tweet in user.tweets:
-            print '  ', tweet.message
+.. _prefetch:
 
 Using prefetch
 ^^^^^^^^^^^^^^
 
-Besides :py:meth:`~SelectQuery.aggregate_rows`, peewee supports a second approach using sub-queries. This method requires the use of a special API, :py:func:`prefetch`. Pre-fetch, as its name indicates, will eagerly load the appropriate tweets for the given users using subqueries. This means instead of *O(n)* queries for *n* rows, we will do *O(k)* queries for *k* tables.
+peewee supports pre-fetching related data using sub-queries. This method requires the use of a special API, :py:func:`prefetch`. Pre-fetch, as its name indicates, will eagerly load the appropriate tweets for the given users using subqueries. This means instead of *O(n)* queries for *n* rows, we will do *O(k)* queries for *k* tables.
 
 Here is an example of how we might fetch several users and any tweets they created within the past week.
 
@@ -1231,9 +1580,70 @@ Here is an example of how we might fetch several users and any tweets they creat
     JOIN clause. When using :py:func:`prefetch` you do not need to specify the
     join.
 
-As with :py:meth:`~SelectQuery.aggregate_rows`, you can use :py:func:`prefetch`
-to query an arbitrary number of tables. Check the API documentation for more
-examples.
+:py:func:`prefetch` can be used to query an arbitrary number of tables. Check the API documentation for more examples.
+
+Some things to consider when using :py:func:`prefetch`:
+
+* Foreign keys must exist between the models being prefetched.
+* In general it is more performant than :py:meth:`~SelectQuery.aggregate_rows`.
+* Typically a lot less data is transferred over the wire since data is not duplicated.
+* There is less Python overhead since we don't have to de-dupe things.
+* `LIMIT` works as you'd expect on the outer-most query, but may be difficult to implement correctly if trying to limit the size of the sub-selects.
+
+.. _aggregate-rows:
+
+Using aggregate_rows
+^^^^^^^^^^^^^^^^^^^^
+
+The :py:meth:`~SelectQuery.aggregate_rows` approach selects all data in one go and de-dupes things in-memory. Like :py:func:`prefetch`, it can work with arbitrarily complex queries. To use this feature We will use a special flag, :py:meth:`~SelectQuery.aggregate_rows`, when creating our query. This method tells peewee to de-duplicate any rows that, due to the structure of the JOINs, may be duplicated.
+
+.. warning::
+    Because there is a lot of computation involved in de-duping data, it is possible that for some queries :py:meth:`~SelectQuery.aggregate_rows` will be **significantly less performant** than using :py:func:`prefetch` (described in the previous section) or even issuing *O(n)* simple queries! Profile your code if you're not sure.
+
+.. code-block:: python
+
+    query = (User
+             .select(User, Tweet)  # As in the previous example, we select both tables.
+             .join(Tweet, JOIN.LEFT_OUTER)
+             .order_by(User.username)  # We need to specify an ordering here.
+             .aggregate_rows())  # Tell peewee to de-dupe and aggregate results.
+
+    for user in query:
+        print user.username
+        for tweet in user.tweets:
+            print '  ', tweet.message
+
+Ordinarily, ``user.tweets`` would be a :py:class:`SelectQuery` and iterating over it would trigger an additional query. By using :py:meth:`~SelectQuery.aggregate_rows`, though, ``user.tweets`` is a Python ``list`` and no additional query occurs.
+
+.. note::
+    We used a *LEFT OUTER* join to ensure that users with zero tweets would also be included in the result set.
+
+Below is an example of how we might fetch several users and any tweets they created within the past week. Because we are filtering the tweets and the user may not have any tweets, we need our *WHERE* clause to allow *NULL* tweet IDs.
+
+.. code-block:: python
+
+    week_ago = datetime.date.today() - datetime.timedelta(days=7)
+    query = (User
+             .select(User, Tweet)
+             .join(Tweet, JOIN.LEFT_OUTER)
+             .where(
+                 (Tweet.id >> None) | (
+                     (Tweet.is_published == True) &
+                     (Tweet.created_date >= week_ago)))
+             .order_by(User.username, Tweet.created_date.desc())
+             .aggregate_rows())
+
+    for user in query:
+        print user.username
+        for tweet in user.tweets:
+            print '  ', tweet.message
+
+Some things to consider when using :py:meth:`~SelectQuery.aggregate_rows`:
+
+* You must specify an ordering for each table that is joined on so the rows can be aggregated correctly, sort of similar to `itertools.groupby <https://docs.python.org/2/library/itertools.html#itertools.groupby>`_.
+* Do not mix calls to :py:meth:`~SelectQuery.aggregate_rows` with ``LIMIT`` or ``OFFSET`` clauses, or with :py:meth:`~SelectQuery.get` (which applies a ``LIMIT 1`` SQL clause). Since the aggregate result set may contain more than one item due to rows being duplicated, limits can lead to incorrect behavior. Imagine you have three users, each of whom has 10 tweets. If you run a query with a ``LIMIT 5``, then you will only receive the first user and their first 5 tweets.
+* In general the Python overhead of de-duplicating data can make this method less performant than :py:func:`prefetch`, and sometimes even less performan than simply issuing *O(n)* simple queries! When in doubt profile.
+* Because every column from every table is included in each row tuple returned by the cursor, this approach can use a lot more bandwidth than :py:func:`prefetch`.
 
 Iterating over lots of rows
 ---------------------------

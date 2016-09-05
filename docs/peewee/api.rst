@@ -1,3 +1,5 @@
+.. _api:
+
 API Reference
 =============
 
@@ -156,6 +158,22 @@ Models
                     yield {'username': username}
             User.insert_many(get_usernames()).execute()
 
+        .. warning::
+            If you are using SQLite, your SQLite library must be version 3.7.11
+            or newer to take advantage of bulk inserts.
+
+        .. note::
+            SQLite has a default limit of 999 bound variables per statement.
+            This limit can be modified at compile-time or at run-time, **but**
+            if modifying at run-time, you can only specify a *lower* value than
+            the default limit.
+
+            For more information, check out the following SQLite documents:
+
+            * `Max variable number limit <https://www.sqlite.org/limits.html#max_variable_number>`_
+            * `Changing run-time limits <https://www.sqlite.org/c3ref/limit.html>`_
+            * `SQLite compile-time flags <https://www.sqlite.org/compile.html>`_
+
     .. py:classmethod:: insert_from(fields, query)
 
         Insert rows into the table using a query as the data source. This API should
@@ -171,7 +189,7 @@ Models
 
             source = (User
                       .select(User.username, fn.COUNT(Tweet.id))
-                      .join(Tweet, JOIN_LEFT_OUTER)
+                      .join(Tweet, JOIN.LEFT_OUTER)
                       .group_by(User.username))
             UserTweetDenorm.insert_from(
                 [UserTweetDenorm.username, UserTweetDenorm.num_tweets],
@@ -236,7 +254,7 @@ Models
 
         .. code-block:: python
 
-            user = User.get(User.username == username, User.password == password)
+            user = User.get(User.username == username, User.active == True)
 
         This method is also exposed via the :py:class:`SelectQuery`, though it
         takes no parameters:
@@ -247,7 +265,7 @@ Models
             try:
                 user = active.where(
                     (User.username == username) &
-                    (User.password == password)
+                    (User.active == True)
                 ).get()
             except User.DoesNotExist:
                 user = None
@@ -257,6 +275,64 @@ Models
             has the added behavior of raising an exception when no matching row is
             found. If more than one row is found, the first row returned by the
             database cursor will be used.
+
+    .. py:classmethod:: get_or_create([defaults=None[, **kwargs]])
+
+        :param dict defaults: A dictionary of values to set on newly-created model instances.
+        :param kwargs: Django-style filters specifying which model to get, and what values to apply to new instances.
+        :returns: A 2-tuple containing the model instance and a boolean indicating whether the instance was created.
+
+        This function attempts to retrieve a model instance based on the provided filters. If no matching model can be found, a new model is created using the parameters specified by the filters and any values in the ``defaults`` dictionary.
+
+        .. note:: Use care when calling ``get_or_create`` with ``autocommit=False``, as the ``get_or_create()`` method will call :py:meth:`Database.atomic` to create either a transaction or savepoint.
+
+        Example **without** ``get_or_create``:
+
+        .. code-block:: python
+
+            # Without `get_or_create`, we might write:
+            try:
+                person = Person.get(
+                    (Person.first_name == 'John') &
+                    (Person.last_name == 'Lennon'))
+            except Person.DoesNotExist:
+                person = Person.create(
+                    first_name='John',
+                    last_name='Lennon',
+                    birthday=datetime.date(1940, 10, 9))
+
+        Equivalent code using ``get_or_create``:
+
+        .. code-block:: python
+
+            person, created = Person.get_or_create(
+                first_name='John',
+                last_name='Lennon',
+                defaults={'birthday': datetime.date(1940, 10, 9)})
+
+    .. py:classmethod:: create_or_get([**kwargs])
+
+        :param kwargs: Field name to value for attempting to create a new instance.
+        :returns: A 2-tuple containing the model instance and a boolean indicating whether the instance was created.
+
+        This function attempts to create a model instance based on the provided kwargs. If an ``IntegrityError`` occurs indicating the violation of a constraint, then Peewee will return the model matching the filters.
+
+        .. note:: Peewee will not attempt to match *all* the kwargs when an ``IntegrityError`` occurs. Rather, only primary key fields or fields that have a unique constraint will be used to retrieve the matching instance.
+
+        .. note:: Use care when calling ``create_or_get`` with ``autocommit=False``, as the ``create_or_get()`` method will call :py:meth:`Database.atomic` to create either a transaction or savepoint.
+
+        Example:
+
+        .. code-block:: python
+
+            # This will succeed, there is no user named 'charlie' currently.
+            charlie, created = User.create_or_get(username='charlie')
+
+            # This will return the above object, since an IntegrityError occurs
+            # when trying to create an object using "charlie's" primary key.
+            user2, created = User.create_or_get(username='foo', id=charlie.id)
+
+            assert user2.username == 'charlie'
 
     .. py:classmethod:: alias()
 
@@ -281,7 +357,7 @@ Models
         :param bool fail_silently: If set to ``True``, the method will check
           for the existence of the table before attempting to create.
 
-        Create the table for the given model.
+        Create the table for the given model, along with any constraints and indexes.
 
         Example:
 
@@ -362,6 +438,21 @@ Models
         .. note::
             If you just want to persist modified fields, you can call
             ``model.save(only=model.dirty_fields)``.
+
+            If you **always** want to only save a model's dirty fields, you can use the Meta
+            option ``only_save_dirty = True``. Then, any time you call :py:meth:`Model.save()`,
+            by default only the dirty fields will be saved, e.g.
+
+            .. code-block:: python
+
+                class Person(Model):
+                    first_name = CharField()
+                    last_name = CharField()
+                    dob = DateField()
+
+                    class Meta:
+                        database = db
+                        only_save_dirty = True
 
     .. py:method:: is_dirty()
 
@@ -614,6 +705,20 @@ Fields
 
         Same as :py:attr:`~TimeField.hour`, except extract second..
 
+.. py:class:: TimestampField
+
+    Stores: python ``datetime.datetime`` instances (stored as integers)
+
+    Accepts a special parameter ``resolution``, which is a power-of-10 up to
+    ``10^6``. This allows sub-second precision while still using an
+    :py:class:`IntegerField` for storage. Default is ``1`` (second precision).
+
+    Also accepts a boolean parameter ``utc``, used to indicate whether the
+    timestamps should be UTC. Default is ``False``.
+
+    Finally, the field ``default`` is the current timestamp. If you do not want
+    this behavior, then explicitly pass in ``default=None``.
+
 .. py:class:: BooleanField
 
     Stores: ``True`` / ``False``
@@ -626,7 +731,17 @@ Fields
 
 .. py:class:: UUIDField
 
-    Store ``UUID`` values. Currently only supported by :py:class:`PostgresqlDatabase`.
+    Store ``UUID`` values.
+
+    .. note:: Currently this field is only supported by :py:class:`PostgresqlDatabase`.
+
+.. py:class:: BareField
+
+    Intended to be used only with SQLite. Since data-types are not enforced, you can declare fields without *any* data-type. It is also common for SQLite virtual tables to use meta-columns or untyped columns, so for those cases as well you may wish to use an untyped field.
+
+    Accepts a special ``coerce`` parameter, a function that takes a value coming from the database and converts it into the appropriate Python type.
+
+    .. note:: Currently this field is only supported by :py:class:`SqliteDatabase`.
 
 .. py:class:: ForeignKeyField(rel_model[, related_name=None[, on_delete=None[, on_update=None[, to_field=None[, ...]]]]])
 
@@ -731,7 +846,7 @@ Query Types
         :param model: the model to join on.  there must be a :py:class:`ForeignKeyField` between
             the current ``query context`` and the model passed in.
         :param join_type: allows the type of ``JOIN`` used to be specified explicitly,
-            one of ``JOIN_INNER``, ``JOIN_LEFT_OUTER``, ``JOIN_FULL``
+            one of ``JOIN.INNER``, ``JOIN.LEFT_OUTER``, ``JOIN.FULL``
         :param on: if multiple foreign keys exist between two models, this parameter
             is the ForeignKeyField to join on.
         :rtype: a :py:class:`Query` instance
@@ -787,9 +902,12 @@ Query Types
 
         .. warning: This method should be implemented by subclasses
 
-    .. py:method:: scalar([as_tuple=False])
+    .. py:method:: scalar([as_tuple=False[, convert=False]])
 
         :param bool as_tuple: return the row as a tuple or a single value
+        :param bool convert: attempt to coerce the selected value to the
+          appropriate data-type based on it's associated Field type (assuming
+          one exists).
         :rtype: the resulting row, either as a single value or tuple
 
         Provide a way to retrieve single values from select queries, for instance
@@ -799,6 +917,19 @@ Query Types
 
             >>> PageView.select(fn.Count(fn.Distinct(PageView.url))).scalar()
             100 # <-- there are 100 distinct URLs in the pageview table
+
+        This example illustrates the use of the `convert` argument. When using
+        a SQLite database, datetimes are stored as strings. To select the max
+        datetime, and have it *returned* as a datetime, we will specify
+        ``convert=True``.
+
+        .. code-block:: pycon
+
+            >>> PageView.select(fn.MAX(PageView.timestamp)).scalar()
+            '2016-04-20 13:37:00.1234'
+
+            >>> PageView.select(fn.MAX(PageView.timestamp)).scalar(convert=True)
+            datetime.datetime(2016, 4, 20, 13, 37, 0, 1234)
 
 
 .. py:class:: SelectQuery(model_class, *selection)
@@ -900,9 +1031,13 @@ Query Types
                 .group_by(User)
                 .having(fn.Count(Tweet.id) > 100))
 
-    .. py:method:: order_by(*clauses)
+    .. py:method:: order_by(*clauses[, extend=False])
 
-        :param clauses: a list of fields, calls to ``field.[asc|desc]()`` or one or more expressions
+        :param clauses: a list of fields, calls to ``field.[asc|desc]()`` or
+          one or more expressions. If called without any arguments, any
+          pre-existing ``ORDER BY`` clause will be removed.
+        :param extend: When called with ``extend=True``, Peewee will append any
+          to the pre-existing ``ORDER BY`` rather than overwriting it.
         :rtype: :py:class:`SelectQuery`
 
         Example of ordering users by username:
@@ -916,8 +1051,23 @@ Query Types
 
         .. code-block:: python
 
-            Tweet.select().join(User).order_by(
-                User.username, Tweet.created_date.desc())
+            query = (Tweet
+                     .select()
+                     .join(User)
+                     .order_by(
+                         User.username,
+                         Tweet.created_date.desc()))
+
+        You can also use ``+`` and ``-`` prefixes to indicate ascending or descending order if you prefer:
+
+        .. code-block:: python
+
+            query = (Tweet
+                     .select()
+                     .join(User)
+                     .order_by(
+                         +User.username,
+                         -Tweet.created_date))
 
         A more complex example ordering users by the number of tweets made (greatest
         to least), then ordered by username in the event of a tie:
@@ -930,6 +1080,17 @@ Query Types
                 .join(Tweet)
                 .group_by(User)
                 .order_by(tweet_ct.desc(), User.username))
+
+        Example of removing a pre-existing ``ORDER BY`` clause:
+
+        .. code-block:: python
+
+            # Query will be ordered by username.
+            users = User.select().order_by(User.username)
+
+            # Query will be returned in whatever order database chooses.
+            unordered_users = users.order_by()
+
 
     .. py:method:: window(*windows)
 
@@ -1081,7 +1242,7 @@ Query Types
 
             query = (User
                      .select(User, Tweet)
-                     .join(Tweet, JOIN_LEFT_OUTER)
+                     .join(Tweet, JOIN.LEFT_OUTER)
                      .order_by(User.username, Tweet.id)
                      .aggregate_rows())  # .aggregate_rows() tells peewee to de-dupe the rows.
             for user in query:
@@ -1108,7 +1269,7 @@ Query Types
             it may be more efficient to use :py:func:`prefetch`. In short, try both and
             see what works best for your data-set.
 
-        .. note:: For more information, see the :ref:`nplusone` document.
+        .. note:: For more information, see the :ref:`nplusone` document and the :ref:`aggregate-rows` sub-section.
 
     .. py:method:: annotate(related_model, aggregation=None)
 
@@ -1136,7 +1297,11 @@ Query Types
             If the ``ForeignKeyField`` is ``nullable``, then a ``LEFT OUTER`` join
             may need to be used::
 
-                User.select().join(Tweet, JOIN_LEFT_OUTER).annotate(Tweet)
+                query = (User
+                         .select()
+                         .join(Tweet, JOIN.LEFT_OUTER)
+                         .switch(User)  # Switch query context back to `User`.
+                         .annotate(Tweet))
 
     .. py:method:: aggregate(aggregation)
 
@@ -1164,7 +1329,7 @@ Query Types
         >>> deleted_tweets.count()
         3  # number of tweets that are marked as deleted
 
-    .. py:method:: wrapped_count([clear_limit=True])
+    .. py:method:: wrapped_count([clear_limit=False])
 
         :param bool clear_limit: Remove any limit or offset clauses from the query before counting.
         :rtype: an integer representing the number of rows in the current query
@@ -1185,7 +1350,7 @@ Query Types
         .. code-block:: python
 
             sq = User.select().where(User.active == True)
-            if sq.where(User.username == username, User.password == password).exists():
+            if sq.where(User.username == username, User.active == True).exists():
                 authenticated = True
 
     .. py:method:: get()
@@ -1208,12 +1373,34 @@ Query Types
 
             user = User.get(User.active == True, User.username == username)
 
-    .. py:method:: first()
+    .. py:method:: first([n=1])
 
-        :rtype: :py:class:`Model` instance or ``None`` if no results
+        :param int n: Return the first *n* query results after applying a limit
+            of ``n`` records.
+        :rtype: :py:class:`Model` instance, list or ``None`` if no results
 
-        Fetch the first row from a query. The result will be cached in case the entire
-        query result-set should be iterated later.
+        Fetch the first *n* rows from a query. Behind-the-scenes, a ``LIMIT n``
+        is applied. The results of the query are then cached on the query
+        result wrapper so subsequent calls to :py:meth:`~SelectQuery.first`
+        will not cause multiple queries.
+
+        If only one row is requested (default behavior), then the return-type
+        will be either a model instance or ``None``.
+
+        If multiple rows are requested, the return type will either be a list
+        of one to n model instances, or ``None`` if no results are found.
+
+    .. py:method:: peek([n=1])
+
+        :param int n: Return the first *n* query results.
+        :rtype: :py:class:`Model` instance, list or ``None`` if no results
+
+        Fetch the first *n* rows from a query. No ``LIMIT`` is applied to the
+        query, so the :py:meth:`~SelectQuery.peek` has slightly different
+        semantics from :py:meth:`~SelectQuery.first`, which ensures no more
+        than *n* rows are requested. The ``peek`` method, on the other hand,
+        retains the ability to fetch the entire result set withouth issuing
+        additional queries.
 
     .. py:method:: execute()
 
@@ -1233,6 +1420,15 @@ Query Types
             for user in User.select().where(User.active == True):
                 print user.username
 
+    .. py:method:: __len__()
+
+        Return the number of items in the result set of this query. If all you need is the count of items and do not intend to do anything with the results, call :py:meth:`~SelectQuery.count`.
+
+        .. warning::
+            The ``SELECT`` query will be executed and the result set will be loaded.
+            If you want to obtain the number of results without also loading
+            the query, use :py:meth:`~SelectQuery.count`.
+
     .. py:method:: __getitem__(value)
 
         :param value: Either an index or a ``slice`` object.
@@ -1251,8 +1447,7 @@ Query Types
         :param rhs: Either a :py:class:`SelectQuery` or a :py:class:`CompoundSelect`
         :rtype: :py:class:`CompoundSelect`
 
-        Create a ``UNION`` query with the right-hand object. The result will contain
-        all values from both the left and right queries.
+        Create a ``UNION`` query with the right-hand object. The result will contain all values from both the left and right queries.
 
         .. code-block:: python
 
@@ -1261,6 +1456,9 @@ Query Types
 
             # Get all cities in kansas where we have either a customer or a store.
             all_cities = (customers | stores).order_by(SQL('city'))
+
+        .. note::
+            SQLite does not allow ``ORDER BY`` or ``LIMIT`` clauses on the components of a compound query, however SQLite does allow these clauses on the final, compound result. This applies to ``UNION (ALL)``, ``INTERSECT``, and ``EXCEPT``.
 
     .. py:method:: __and__(rhs)
 
@@ -1339,8 +1537,68 @@ Query Types
 
         Performs the query
 
+    .. py:method:: returning(*returning)
 
-.. py:class:: InsertQuery(model_class[, field_dict=None[, rows=None[, fields=None[, query=None]]]])
+        :param returning: A list of model classes, field instances, functions
+          or expressions. If no argument is provided, all columns for the given model
+          will be selected. To clear any existing values, pass in ``None``.
+        :rtype: a :py:class:`UpdateQuery` for the given :py:class:`Model`.
+
+        Add a ``RETURNING`` clause to the query, which will cause the ``UPDATE`` to compute return values based on each row that was actually updated.
+
+        When the query is executed, rather than returning the number of rows updated, an iterator will be returned that yields the updated objects.
+
+        .. note:: Currently only :py:class:`PostgresqlDatabase` supports this feature.
+
+        Example:
+
+        .. code-block:: python
+
+            # Disable all users whose registration expired, and return the user
+            # objects that were updated.
+            query = (User
+                     .update(active=False)
+                     .where(User.registration_expired == True)
+                     .returning(User))
+
+            # We can iterate over the users that were updated.
+            for updated_user in query.execute():
+                send_activation_email(updated_user.email)
+
+        For more information, check out :ref:`the RETURNING clause docs <returning-clause>`.
+
+    .. py:method:: tuples()
+
+        :rtype: :py:class:`UpdateQuery`
+
+        .. note:: This method should only be used in conjunction with a call to :py:meth:`~UpdateQuery.returning`.
+
+        When the updated results are returned, they will be returned as row tuples.
+
+    .. py:method:: dicts()
+
+        :rtype: :py:class:`UpdateQuery`
+
+        .. note:: This method should only be used in conjunction with a call to :py:meth:`~UpdateQuery.returning`.
+
+        When the updated results are returned, they will be returned as dictionaries mapping column to value.
+
+    .. py:method:: on_conflict([action=None])
+
+        Add a SQL ``ON CONFLICT`` clause with the specified action to the given ``UPDATE`` query. `Valid actions <https://www.sqlite.org/lang_conflict.html>`_ are:
+
+        * ROLLBACK
+        * ABORT
+        * FAIL
+        * IGNORE
+        * REPLACE
+
+        Specifying ``None`` for the action will execute a normal ``UPDATE`` query.
+
+        .. note:: This feature is only available on SQLite databases.
+
+
+.. py:class:: InsertQuery(model_class[, field_dict=None[, rows=None[, fields=None[, query=None[, validate_fields=False]]]]])
 
     Creates an ``InsertQuery`` instance for the given model.
 
@@ -1349,6 +1607,7 @@ Query Types
         field or field-name to value.
     :param list fields: A list of field objects to insert data into (only used in combination with the ``query`` parameter).
     :param query: A :py:class:`SelectQuery` to use as the source of data.
+    :param bool validate_fields: Check that every column referenced in the insert query has a corresponding field on the model. If validation is enabled and then fails, a ``KeyError`` is raised.
 
     Basic example:
 
@@ -1376,7 +1635,7 @@ Query Types
 
         query = (User
                  .select(User.username, fn.COUNT(Tweet.id))
-                 .join(Tweet, JOIN_LEFT_OUTER)
+                 .join(Tweet, JOIN.LEFT_OUTER)
                  .group_by(User.username))
         iq = InsertQuery(
             UserTweetDenorm,
@@ -1392,8 +1651,87 @@ Query Types
 
     .. py:method:: upsert([upsert=True])
 
-        Perform an *INSERT OR REPLACE* query. Currently only Sqlite supports
-        this method.
+        Perform an *INSERT OR REPLACE* query with SQLite. MySQL databases will issue a *REPLACE* query. Currently this feature is not supported for Postgres databases, but the 9.5 syntax will be added soon.
+
+        .. note:: This feature is only available on SQLite and MySQL databases.
+
+    .. py:method:: on_conflict([action=None])
+
+        Add a SQL ``ON CONFLICT`` clause with the specified action to the given ``INSERT`` query. Specifying ``REPLACE`` is equivalent to using the :py:meth:`~InsertQuery.upsert` method. `Valid actions <https://www.sqlite.org/lang_conflict.html>`_ are:
+
+        * ROLLBACK
+        * ABORT
+        * FAIL
+        * IGNORE
+        * REPLACE
+
+        Specifying ``None`` for the action will execute a normal ``INSERT`` query.
+
+        .. note:: This feature is only available on SQLite databases.
+
+    .. py:method:: return_id_list([return_id_list=True])
+
+        By default, when doing bulk INSERTs, peewee will not return the list of generated primary keys. However, if the database supports returning primary keys via ``INSERT ... RETURNING``, this method instructs peewee to return the generated list of IDs.
+
+        .. note::
+            Currently only PostgreSQL supports this behavior. While other databases support bulk inserts, they will simply return ``True`` instead.
+
+        Example:
+
+        .. code-block:: python
+
+            usernames = [
+                {'username': username}
+                for username in ['charlie', 'huey', 'mickey']]
+            query = User.insert_many(usernames).return_id_list()
+            user_ids = query.execute()
+            print user_ids
+            # prints something like [1, 2, 3]
+
+    .. py:method:: returning(*returning)
+
+        :param returning: A list of model classes, field instances, functions
+          or expressions. If no argument is provided, all columns for the given model
+          will be selected. To clear any existing values, pass in ``None``.
+        :rtype: a :py:class:`InsertQuery` for the given :py:class:`Model`.
+
+        Add a ``RETURNING`` clause to the query, which will cause the ``INSERT`` to compute return values based on each row that was inserted.
+
+        When the query is executed, rather than returning the primary key of the new row(s), an iterator will be returned that yields the inserted objects.
+
+        .. note:: Currently only :py:class:`PostgresqlDatabase` supports this feature.
+
+        Example:
+
+        .. code-block:: python
+
+            # Create some users, retrieving the list of IDs assigned to them.
+            query = (User
+                     .insert_many(list_of_user_data)
+                     .returning(User))
+
+            # We can iterate over the users that were created.
+            for new_user in query.execute():
+                # Do something with the new user's ID...
+                do_something(new_user.id)
+
+        For more information, check out :ref:`the RETURNING clause docs <returning-clause>`.
+
+    .. py:method:: tuples()
+
+        :rtype: :py:class:`InsertQuery`
+
+        .. note:: This method should only be used in conjunction with a call to :py:meth:`~InsertQuery.returning`.
+
+        When the inserted results are returned, they will be returned as row tuples.
+
+    .. py:method:: dicts()
+
+        :rtype: :py:class:`InsertQuery`
+
+        .. note:: This method should only be used in conjunction with a call to :py:meth:`~InsertQuery.returning`.
+
+        When the inserted results are returned, they will be returned as dictionaries mapping column to value.
 
 .. py:class:: DeleteQuery(model_class)
 
@@ -1414,6 +1752,52 @@ Query Types
         :rtype: Number of rows deleted
 
         Performs the query
+
+    .. py:method:: returning(*returning)
+
+        :param returning: A list of model classes, field instances, functions
+          or expressions. If no argument is provided, all columns for the given model
+          will be selected. To clear any existing values, pass in ``None``.
+        :rtype: a :py:class:`DeleteQuery` for the given :py:class:`Model`.
+
+        Add a ``RETURNING`` clause to the query, which will cause the ``DELETE`` to compute return values based on each row that was removed from the database.
+
+        When the query is executed, rather than returning the number of rows deleted, an iterator will be returned that yields the deleted objects.
+
+        .. note:: Currently only :py:class:`PostgresqlDatabase` supports this feature.
+
+        Example:
+
+        .. code-block:: python
+
+            # Create some users, retrieving the list of IDs assigned to them.
+            query = (User
+                     .delete()
+                     .where(User.account_expired == True)
+                     .returning(User))
+
+            # We can iterate over the user objects that were deleted.
+            for deleted_user in query.execute():
+                # Do something with the deleted user.
+                notify_account_deleted(deleted_user.email)
+
+        For more information, check out :ref:`the RETURNING clause docs <returning-clause>`.
+
+    .. py:method:: tuples()
+
+        :rtype: :py:class:`DeleteQuery`
+
+        .. note:: This method should only be used in conjunction with a call to :py:meth:`~DeleteQuery.returning`.
+
+        When the deleted results are returned, they will be returned as row tuples.
+
+    .. py:method:: dicts()
+
+        :rtype: :py:class:`DeleteQuery`
+
+        .. note:: This method should only be used in conjunction with a call to :py:meth:`~DeleteQuery.returning`.
+
+        When the deleted results are returned, they will be returned as dictionaries mapping column to value.
 
 
 .. py:class:: RawQuery(model_class, sql, *params)
@@ -1477,7 +1861,8 @@ Query Types
 
     :param sq: :py:class:`SelectQuery` instance
     :param subqueries: one or more :py:class:`SelectQuery` instances to prefetch for ``sq``. You
-        can also pass models, but they will be converted into SelectQueries.
+        can also pass models, but they will be converted into SelectQueries. If you wish to specify
+        a particular model to join against, you can pass a 2-tuple of ``(query_or_model, join_model)``.
 
     :rtype: :py:class:`SelectQuery` with related instances pre-populated
 
@@ -1533,21 +1918,21 @@ Query Types
 
     .. note:: Subqueries must be related by foreign key and can be arbitrarily deep
 
-    .. note:: For more information, see the :ref:`nplusone` document.
+    .. note:: For more information, see the :ref:`nplusone` document and the :ref:`prefetch` sub-section.
 
     .. warning::
         :py:func:`prefetch` can use up lots of RAM when the result set is large,
         and will not warn you if you are doing something dangerous, so it is up
         to you to know when to use it.  Additionally, because of the semantics of
         subquerying, there may be some cases when prefetch does not act as you
-        expect (for instnace, when applying a ``LIMIT`` to subqueries, but there
+        expect (for instance, when applying a ``LIMIT`` to subqueries, but there
         may be others) -- please report anything you think is a bug to `github <https://github.com/coleifer/peewee/issues>`_.
 
 
 Database and its subclasses
 ---------------------------
 
-.. py:class:: Database(database[, threadlocals=False[, autocommit=True[, fields=None[, ops=None[, autorollback=False[, **connect_kwargs]]]]]])
+.. py:class:: Database(database[, threadlocals=True[, autocommit=True[, fields=None[, ops=None[, autorollback=False[, use_speedups=True[, **connect_kwargs]]]]]]])
 
     :param database: the name of the database (or filename if using sqlite)
     :param bool threadlocals: whether to store connections in a threadlocal
@@ -1555,21 +1940,27 @@ Database and its subclasses
     :param dict fields: a mapping of :py:attr:`~Field.db_field` to database column type, e.g. 'string' => 'varchar'
     :param dict ops: a mapping of operations understood by the querycompiler to expressions
     :param bool autorollback: automatically rollback when an exception occurs while executing a query.
+    :param bool use_speedups: use the Cython speedups module to improve performance of some queries.
     :param connect_kwargs: any arbitrary parameters to pass to the database driver when connecting
 
+    The ``connect_kwargs`` dictionary is used for vendor-specific parameters that will be passed back directly to your database driver, allowing you to specify the ``user``, ``host`` and ``password``, for instance. For more information and examples, see the :ref:`vendor-specific parameters document <vendor-specific-parameters>`.
+
     .. note::
-        if your database name is not known when the class is declared, you can pass
+        If your database name is not known when the class is declared, you can pass
         ``None`` in as the database name which will mark the database as "deferred"
         and any attempt to connect while in this state will raise an exception.  To
         initialize your database, call the :py:meth:`Database.init` method with
-        the database name
+        the database name.
 
-    A high-level api for working with the supported database engines.  ``Database``
-    provides a wrapper around some of the functions performed by the ``Adapter``,
-    in addition providing support for:
+        For an in-depth discussion of run-time database configuration, see the :ref:`deferring_initialization` section.
 
-    - execution of SQL queries
-    - creating and dropping tables and indexes
+    A high-level API for working with the supported database engines. The database class:
+
+    * Manages the underlying database connection.
+    * Executes queries.
+    * Manage transactions and savepoints.
+    * Create and drop tables and indexes.
+    * Introspect the database.
 
     .. py:attribute:: commit_select = False
 
@@ -1579,6 +1970,22 @@ Database and its subclasses
     .. py:attribute:: compiler_class = QueryCompiler
 
         A class suitable for compiling queries
+
+    .. py:attribute:: compound_operations = ['UNION', 'INTERSECT', 'EXCEPT']
+
+        Supported compound query operations.
+
+    .. py:attribute:: compound_select_parentheses = False
+
+        Whether ``UNION`` (or other compound ``SELECT`` queries) allow parentheses around the queries.
+
+    .. py:attribute:: distinct_on = False
+
+        Whether the database supports ``DISTINCT ON`` statements.
+
+    .. py:attribute:: drop_cascade = False
+
+        Whether the database supports cascading drop table queries.
 
     .. py:attribute:: field_overrides = {}
 
@@ -1592,13 +1999,25 @@ Database and its subclasses
 
         Whether the given backend supports selecting rows for update
 
+    .. py:attribute:: for_update_nowait = False
+
+        Whether the given backend supports selecting rows for update
+
+    .. py:attribute:: insert_many = True
+
+        Whether the database supports multiple ``VALUES`` clauses for ``INSERT`` queries.
+
+    .. py:attribute:: insert_returning = False
+
+        Whether the database supports returning the primary key for newly inserted rows.
+
     .. py:attribute:: interpolation = '?'
 
         The string used by the driver to interpolate query parameters
 
     .. py:attribute:: op_overrides = {}
 
-        A mapping of operation codes to string operations, e.g. ``{OP_LIKE: 'LIKE BINARY'}``
+        A mapping of operation codes to string operations, e.g. ``{OP.LIKE: 'LIKE BINARY'}``
 
     .. py:attribute:: quote_char = '"'
 
@@ -1609,6 +2028,22 @@ Database and its subclasses
         Table names that are reserved by the backend -- if encountered in the
         application a warning will be issued.
 
+    .. py:attribute:: returning_clause = False
+
+        Whether the database supports ``RETURNING`` clauses for ``UPDATE``, ``INSERT`` and ``DELETE`` queries.
+
+        .. note:: Currently only :py:class:`PostgresqlDatabase` supports this.
+
+        See the following for more information:
+
+        * :py:meth:`UpdateQuery.returning`
+        * :py:meth:`InsertQuery.returning`
+        * :py:meth:`DeleteQuery.returning`
+
+    .. py:attribute:: savepoints = True
+
+        Whether the given backend supports savepoints.
+
     .. py:attribute:: sequences = False
 
         Whether the given backend supports sequences
@@ -1618,11 +2053,13 @@ Database and its subclasses
         Whether the given backend supports deleting rows using a subquery
         that selects from the same table
 
+    .. py:attribute:: window_functions = False
+
+        Whether the given backend supports window functions.
+
     .. py:method:: init(database[, **connect_kwargs])
 
-        If the database was instantiated with ``database=None``, the database is said to be in
-        a 'deferred' state (see :ref:`notes <deferring_initialization>`) -- if this is the case,
-        you can initialize it at any time by calling the ``init`` method.
+        This method is used to initialize a deferred database. For details on configuring your database at run-time, see the :ref:`deferring_initialization` section.
 
         :param database: the name of the database (or filename if using sqlite)
         :param connect_kwargs: any arbitrary parameters to pass to the database driver when connecting
@@ -1632,9 +2069,7 @@ Database and its subclasses
         Establishes a connection to the database
 
         .. note::
-            If you initialized with ``threadlocals=True``, then this will store
-            the connection inside a threadlocal, ensuring that connections are not
-            shared across threads.
+            By default, connections will be stored on a threadlocal, ensuring connections are not shared across threads. To disable this behavior, initialize the database with ``threadlocals=False``.
 
     .. py:method:: close()
 
@@ -1643,6 +2078,18 @@ Database and its subclasses
         .. note::
             If you initialized with ``threadlocals=True``, only a connection local
             to the calling thread will be closed.
+
+    .. py:method:: initialize_connection(conn)
+
+        Perform additional intialization on a newly-opened connection. For example, if you are using SQLite you may want to enable foreign key constraint enforcement (off by default).
+
+        Here is how you might use this hook to load a SQLite extension:
+
+        .. code-block:: python
+
+            class CustomSqliteDatabase(SqliteDatabase):
+                def initialize_connection(self, conn):
+                    conn.load_extension('fts5')
 
     .. py:method:: get_conn()
 
@@ -1667,6 +2114,12 @@ Database and its subclasses
         :rtype: an instance of :py:class:`QueryCompiler` using the field and
             op overrides specified.
 
+    .. py:method:: execute(clause)
+
+        :param Node clause: a :py:class:`Node` instance or subclass (e.g. a :py:class:`SelectQuery`).
+
+        The clause will be compiled into SQL then sent to the :py:meth:`~Database.execute_sql` method.
+
     .. py:method:: execute_sql(sql[, params=None[, require_commit=True]])
 
         :param sql: a string sql query
@@ -1684,46 +2137,51 @@ Database and its subclasses
 
     .. py:method:: commit()
 
-        Call ``commit()`` on the active connection, committing the current transaction
+        Call ``commit()`` on the active connection, committing the current transaction.
 
     .. py:method:: rollback()
 
-        Call ``rollback()`` on the active connection, rolling back the current transaction
+        Call ``rollback()`` on the active connection, rolling back the current transaction.
 
     .. py:method:: set_autocommit(autocommit)
 
-        :param autocommit: a boolean value indicating whether to turn on/off autocommit
-            **for the current connection**
+        :param autocommit: a boolean value indicating whether to turn on/off autocommit.
 
     .. py:method:: get_autocommit()
 
-        :rtype: a boolean value indicating whether autocommit is on **for the current connection**
+        :rtype: a boolean value indicating whether autocommit is enabled.
 
-    .. py:method:: get_tables()
+    .. py:method:: get_tables([schema=None])
 
-        :rtype: a list of table names in the database
+        :rtype: a list of table names in the database.
 
-        .. warning::
-            Not implemented -- implementations exist in subclasses
+    .. py:method:: get_indexes(table, [schema=None])
 
-    .. py:method:: get_indexes_for_table(table)
+        :rtype: a list of :py:class:`IndexMetadata` instances, representing the indexes for the given table.
 
-        :param table: the name of table to introspect
-        :rtype: a list of ``(index_name, is_unique)`` tuples
+    .. py:method:: get_columns(table, [schema=None])
 
-        .. warning::
-            Not implemented -- implementations exist in subclasses
+        :rtype: a list of :py:class:`ColumnMetadata` instances, representing the columns for the given table.
+
+    .. py:method:: get_primary_keys(table, [schema=None])
+
+        :rtype: a list containing the primary key column name(s) for the given table.
+
+    .. py:method:: get_foreign_keys(table, [schema=None])
+
+        :rtype: a list of :py:class:`ForeignKeyMetadata` instances, representing the foreign keys for the given table.
 
     .. py:method:: sequence_exists(sequence_name)
 
         :rtype boolean:
 
+    .. py:method:: create_table(model_class[, safe=True])
+
+        :param model_class: :py:class:`Model` class.
+        :param bool safe: If `True`, the table will not be created if it already exists.
+
         .. warning::
-            Not implemented -- implementations exist in subclasses
-
-    .. py:method:: create_table(model_class)
-
-        :param model_class: :py:class:`Model` class to create table for
+            Unlike :py:meth:`Model.create_table`, this method does not create indexes or constraints. This method will only create the table itself. If you wish to create the table along with any indexes and constraints, use either :py:meth:`Model.create_table` or :py:meth:`Database.create_tables`.
 
     .. py:method:: create_index(model_class, fields[, unique=False])
 
@@ -1743,17 +2201,17 @@ Database and its subclasses
 
         .. code-block:: python
 
-            PostProxy = Proxy()
+            DeferredPost = DeferredRelation()
 
             class User(Model):
                 username = CharField()
-                favorite_post = ForeignKeyField(PostProxy, null=True)
+                favorite_post = ForeignKeyField(DeferredPost, null=True)
 
             class Post(Model):
                 title = CharField()
                 author = ForeignKeyField(User, related_name='posts')
 
-            PostProxy.initialize(Post)
+            DeferredPost.set_model(Post)
 
             # Create tables.  The foreign key from Post -> User will be created
             # automatically, but the foreign key from User -> Post must be added
@@ -1788,7 +2246,7 @@ Database and its subclasses
         :param list models: A list of models.
         :param bool safe: Check first whether the table exists before attempting to create it.
 
-        This method should be used for creating tables as it will resolve the model dependency graph and ensure the tables are created in the correct order.
+        This method should be used for creating tables as it will resolve the model dependency graph and ensure the tables are created in the correct order. This method will also create any indexes and constraints defined on the models.
 
         Usage:
 
@@ -1810,11 +2268,50 @@ Database and its subclasses
 
             db.drop_tables([User, Tweet, Something], safe=True)
 
+    .. py:method:: atomic()
+
+        Execute statements in either a transaction or a savepoint. The outer-most call to *atomic* will use a transaction,
+        and any subsequent nested calls will use savepoints.
+
+        ``atomic`` can be used as either a context manager or a decorator.
+
+        .. note::
+            For most use-cases, it makes the most sense to always use :py:meth:`~Database.atomic` when you wish to execute queries in a transaction. The benefit of using ``atomic`` is that you do not need to manually keep track of the transaction stack depth, as this will be managed for you.
+
+        Context manager example code:
+
+        .. code-block:: python
+
+            with db.atomic() as txn:
+                perform_some_operations()
+
+                with db.atomic() as nested_txn:
+                    do_other_things()
+                    if something_bad_happened():
+                        # Roll back these changes, but preserve the changes
+                        # made in the outer block.
+                        nested_txn.rollback()
+
+        Decorator example code:
+
+        .. code-block:: python
+
+            @db.atomic()
+            def create_user(username):
+                # This function will execute in a transaction/savepoint.
+                return User.create(username=username)
+
     .. py:method:: transaction()
 
-        Return a context manager that executes statements in a transaction.  If an
-        error is raised inside the context manager, the transaction will be rolled
-        back, otherwise statements are committed when exiting.
+        Execute statements in a transaction using either a context manager or decorator. If an
+        error is raised inside the wrapped block, the transaction will be rolled
+        back, otherwise statements are committed when exiting. Transactions can also be explicitly rolled back or committed within the transaction block by calling :py:meth:`~transaction.rollback` or :py:meth:`~transaction.commit`. If you manually commit or roll back, a new transaction will be started automatically.
+
+        Nested blocks can be wrapped with ``transaction`` - the database
+        will keep a stack and only commit when it reaches the end of the outermost
+        function / block.
+
+        Context manager example code:
 
         .. code-block:: python
 
@@ -1823,35 +2320,61 @@ Database and its subclasses
             with database.transaction():
                 blog.delete_instance(recursive=True)
 
-    .. py:method:: commit_on_success(func)
 
-        Decorator that wraps the given function in a single transaction, which,
-        upon success will be committed.  If an error is raised inside the function,
-        the transaction will be rolled back and the error will be re-raised.
+            # Explicitly roll back a transaction.
+            with database.transaction() as txn:
+                do_some_stuff()
+                if something_bad_happened():
+                    # Roll back any changes made within this block.
+                    txn.rollback()
 
-        Nested functions can be wrapped with ``commit_on_success`` - the database
-        will keep a stack and only commit when it reaches the end of the outermost
-        function.
-
-        :param func: function to decorate
+        Decorator example code:
 
         .. code-block:: python
 
-            @database.commit_on_success
+            @database.transaction()
             def transfer_money(from_acct, to_acct, amt):
                 from_acct.charge(amt)
                 to_acct.pay(amt)
                 return amt
 
+    .. py:method:: commit_on_success(func)
+
+        .. note:: Use :py:meth:`~Database.atomic` or :py:meth:`~Database.transaction` instead.
+
     .. py:method:: savepoint([sid=None])
 
-        Return a context manager that executes statements in a savepoint.  If an
-        error is raised inside the context manager, the savepoint will be rolled
-        back, otherwise statements are committed when exiting.
+        Execute statements in a savepoint using either a context manager or decorator.  If an
+        error is raised inside the wrapped block, the savepoint will be rolled
+        back, otherwise statements are committed when exiting. Like :py:meth:`~Database.transaction`, a savepoint can also be explicitly rolled-back or committed by calling :py:meth:`~savepoint.rollback` or :py:meth:`~savepoint.commit`. If you manually commit or roll back, a new savepoint **will not** be created.
 
         Savepoints can be thought of as nested transactions.
 
-        :param str sid: A string identifier for the savepoint.
+        :param str sid: An optional string identifier for the savepoint.
+
+        Context manager example code:
+
+        .. code-block:: python
+
+            with db.transaction() as txn:
+                do_some_stuff()
+                with db.savepoint() as sp1:
+                    do_more_things()
+
+                with db.savepoint() as sp2:
+                    even_more()
+                    # Oops, something bad happened, roll back
+                    # just the changes made in this block.
+                    if something_bad_happened():
+                        sp2.rollback()
+
+    .. py:method:: execution_context([with_transaction=True])
+
+        Create an :py:class:`ExecutionContext` context manager or decorator. Blocks wrapped with an *ExecutionContext* will run using their own connection. By default, the wrapped block will also run in a transaction, although this can be disabled specifyin ``with_transaction=False``.
+
+        For more explanation of :py:class:`ExecutionContext`, see the :ref:`advanced_connection_management` section.
+
+        .. warning:: ExecutionContext is very new and has not been tested extensively.
 
     .. py:classmethod:: register_fields(fields)
 
@@ -1863,7 +2386,7 @@ Database and its subclasses
     .. py:classmethod:: register_ops(ops)
 
         Register a mapping of operations understood by the QueryCompiler to their
-        SQL equivalent, e.g. ``{OP_EQ: '='}``.  Used to extend the types of field
+        SQL equivalent, e.g. ``{OP.EQ: '='}``.  Used to extend the types of field
         comparisons.
 
         :param dict fields: A mapping of :py:attr:`~Field.db_field` to column type
@@ -1878,41 +2401,233 @@ Database and its subclasses
         :param Field date_field: field instance storing a datetime, date or time.
         :rtype: an expression object.
 
-    .. py:method:: sql_error_handler(exception, sql, params, require_commit)
+    .. py:method:: truncate_date(date_part, date_field)
 
-        This hook is called when an error is raised executing a query, allowing
-        your application to inject custom error handling behavior.  The default
-        implementation simply reraises the exception.
+        Return an expression suitable for truncating a date / datetime to the given resolution. This can be used, for example, to group a collection of timestamps by day.
+
+        :param str date_part: The date part to truncate to. Valid options are: "year", "month", "day", "hour", "minute" and "second".
+        :param Field date_field: field instance storing a datetime, date or time.
+        :rtype: an expression object.
+
+        Example:
 
         .. code-block:: python
 
-            class SqliteDatabaseCustom(SqliteDatabase):
-                def sql_error_handler(self, exception, sql, params, require_commit):
-                    # Perform some custom behavior, for example close the
-                    # connection to the database.
-                    self.close()
-
-                    # Re-raise the exception.
-                    raise exception
+            # Get tweets from today.
+            tweets = Tweet.select().where(
+                db.truncate_date('day', Tweet.timestamp) == datetime.date.today())
 
 
 .. py:class:: SqliteDatabase(Database)
 
-    :py:class:`Database` subclass that works with the "sqlite3" driver. In addition to the default database parameters, :py:class:`SqliteDatabase` also accepts a *journal_mode* parameter which will configure the journaling mode.
+    :py:class:`Database` subclass that works with the ``sqlite3`` driver (or ``pysqlite2``). In addition to the default database parameters, :py:class:`SqliteDatabase` also accepts a *journal_mode* parameter which will configure the journaling mode.
 
-    To use write-ahead log and connection-per-thread:
+    .. note:: If you have both ``sqlite3`` and ``pysqlite2`` installed on your system, peewee will use whichever points at a newer version of SQLite.
+
+    .. note:: SQLite is unique among the databases supported by Peewee in that it allows a high degree of customization by the host application. This means you can do things like write custom functions or aggregates *in Python* and then call them from your SQL queries. This feature, and many more, are available through the :py:class:`SqliteExtDatabase`, part of ``playhouse.sqlite_ext``. I *strongly* recommend you use :py:class:`SqliteExtDatabase` as it exposes many of the features that make SQLite so powerful.
+
+    Custom parameters:
+
+    :param str journal_mode: Journaling mode.
+    :param list pragmas: List of 2-tuples containing ``PRAGMA`` statements to run against new connections.
+
+    SQLite allows run-time configuration of a number of parameters through ``PRAGMA`` statements (`documentation <https://www.sqlite.org/pragma.html>`_). These statements are typically run against a new database connection. To run one or more ``PRAGMA`` statements against new connections, you can specify them as a list of 2-tuples containing the pragma name and value:
 
     .. code-block:: python
 
-        db = SqliteDatabase('my_app.db', threadlocals=True, journal_mode='WAL')
+        db = SqliteDatabase('my_app.db', pragmas=(
+            ('journal_mode', 'WAL'),
+            ('cache_size', 10000),
+            ('mmap_size', 1024 * 1024 * 32),
+        ))
+
+    .. py:attribute:: insert_many = True *if* using SQLite 3.7.11.0 or newer.
+
 
 .. py:class:: MySQLDatabase(Database)
 
     :py:class:`Database` subclass that works with either "MySQLdb" or "pymysql".
 
+    .. py:attribute:: commit_select = True
+
+    .. py:attribute:: compound_operations = ['UNION']
+
+    .. py:attribute:: for_update = True
+
+    .. py:attribute:: subquery_delete_same_table = False
+
 .. py:class:: PostgresqlDatabase(Database)
 
     :py:class:`Database` subclass that works with the "psycopg2" driver
+
+    .. py:attribute:: commit_select = True
+
+    .. py:attribute:: compound_select_parentheses = True
+
+    .. py:attribute:: distinct_on = True
+
+    .. py:attribute:: for_update = True
+
+    .. py:attribute:: for_update_nowait = True
+
+    .. py:attribute:: insert_returning = True
+
+    .. py:attribute:: returning_clause = True
+
+    .. py:attribute:: sequences = True
+
+    .. py:attribute:: window_functions = True
+
+    .. py:attribute:: register_unicode = True
+
+        Control whether the ``UNICODE`` and ``UNICODEARRAY`` psycopg2 extensions are loaded automatically.
+
+Transaction, Savepoint and ExecutionContext
+-------------------------------------------
+
+The easiest way to create transactions and savepoints is to use :py:meth:`Database.atomic`. The :py:meth:`~Database.atomic` method will create a transaction or savepoint depending on the level of nesting.
+
+.. code-block:: python
+
+    with db.atomic() as txn:
+        # The outer-most call will be a transaction.
+        with db.atomic() as sp:
+            # Nested calls will be savepoints instead.
+            execute_some_statements()
+
+.. py:class:: transaction(database)
+
+    Context manager that encapsulates a database transaction. Statements executed within the wrapped block will be committed at the end of the block unless an exception occurs, in which case any changes will be rolled back.
+
+    .. warning:: Transactions should not be nested as this could lead to unpredictable behavior in the event of an exception in a nested block. If you wish to use nested transactions, use the :py:meth:`~Database.atomic` method, which will create a transaction at the outer-most layer and use savepoints for nested blocks.
+
+    .. note:: In practice you should not create :py:class:`transaction` objects directly, but rather use the :py:meth:`Database.transaction` method.
+
+    .. py:method:: commit()
+
+        Manually commit any pending changes and begin a new transaction.
+
+    .. py:method:: rollback()
+
+        Manually roll-back any pending changes and begin a new transaction.
+
+.. py:class:: savepoint(database[, sid=None])
+
+    Context manager that encapsulates a savepoint (nested transaction). Statements executed within the wrapped block will be committed at the end of the block unless an exception occurs, in which case any changes will be rolled back.
+
+    .. warning:: Savepoints must be created within a transaction. It is recommended that you use :py:meth:`~Database.atomic` instead of manually managing the transaction+savepoint stack.
+
+    .. note:: In practice you should not create :py:class:`savepoint` objects directly, but rather use the :py:meth:`Database.savepoint` method.
+
+    .. py:method:: commit()
+
+        Manually commit any pending changes. If the savepoint is manually committed and additional changes are made, they will be executed in the context of the outer block.
+
+    .. py:method:: rollback()
+
+        Manually roll-back any pending changes. If the savepoint is manually rolled-back and additional changes are made, they will be executed in the context of the outer block.
+
+.. py:class:: ExecutionContext(database[, with_transaction=True])
+
+    ExecutionContext provides a way to explicitly run statements in a dedicated connection. Typically a single database connection is maintained per-thread, but in some situations you may wish to explicitly force a new, separate connection. To accomplish this, you can create an :py:class:`ExecutionContext`. Statements executed in the wrapped block will be run in a transaction by default, though you can disable this by specifying ``with_transaction=False``.
+
+    .. note:: Rather than instantiating ``ExecutionContext`` directly, use :py:meth:`Database.execution_context`.
+
+    Example code:
+
+    .. code-block:: python
+
+        # This will return the connection associated with the current thread.
+        conn = db.get_conn()
+
+        with db.execution_context():
+            # This will be a new connection object. If you are using the
+            # connection pool, it may be an unused connection from the pool.
+            ctx_conn = db.get_conn()
+
+            # This statement is executed using the new `ctx_conn`.
+            User.create(username='huey')
+
+        # At the end of the wrapped block, the connection will be closed and the
+        # transaction, if one exists, will be committed.
+
+        # This statement is executed using the regular `conn`.
+        User.create(username='mickey')
+
+.. py:class:: Using(database, models[, with_transaction=True])
+
+    For the duration of the wrapped block, all queries against the given ``models`` will use the specified ``database``. Optionally these queries can be run outside a transaction by specifying ``with_transaction=False``.
+
+    ``Using`` provides, in short, a way to run queries on a list of models using a manually specified database.
+
+    :param database: a :py:class:`Database` instance.
+    :param models: a list of :py:class:`Model` classes to use with the given database.
+    :param with_transaction: Whether the wrapped block should be run in a transaction.
+
+Metadata Types
+--------------
+
+.. py:class:: IndexMetadata(name, sql, columns, unique, table)
+
+    .. py:attribute:: name
+
+        The name of the index.
+
+    .. py:attribute:: sql
+
+        The SQL query used to generate the index.
+
+    .. py:attribute:: columns
+
+        A list of columns that are covered by the index.
+
+    .. py:attribute:: unique
+
+        A boolean value indicating whether the index has a unique constraint.
+
+    .. py:attribute:: table
+
+        The name of the table containing this index.
+
+.. py:class:: ColumnMetadata(name, data_type, null, primary_key, table)
+
+    .. py:attribute:: name
+
+        The name of the column.
+
+    .. py:attribute:: data_type
+
+        The data type of the column
+
+    .. py:attribute:: null
+
+        A boolean value indicating whether ``NULL`` is permitted in this column.
+
+    .. py:attribute:: primary_key
+
+        A boolean value indicating whether this column is a primary key.
+
+    .. py:attribute:: table
+
+        The name of the table containing this column.
+
+.. py:class:: ForeignKeyMetadata(column, dest_table, dest_column, table)
+
+    .. py:attribute:: column
+
+        The column containing the foreign key (the "source").
+
+    .. py:attribute:: dest_table
+
+        The table referenced by the foreign key.
+
+    .. py:attribute:: dest_column
+
+        The column referenced by the foreign key (on ``dest_table``).
+
+    .. py:attribute:: table
+
+        The name of the table containing this foreign key.
 
 Misc
 ----
@@ -2000,7 +2715,7 @@ Misc
         # user.
         query = (User
                  .select(User, fn.Count(Tweet.id).alias('ct'))
-                 .join(Tweet, JOIN_LEFT_OUTER)
+                 .join(Tweet, JOIN.LEFT_OUTER)
                  .group_by(User))
 
         # Sort the users by number of tweets.
@@ -2027,6 +2742,31 @@ Misc
                      fn.Avg(Employee.salary).over(window))
                  .window(window)
                  .order_by(Employee.name))
+
+.. py:class:: DeferredRelation()
+
+    Used to reference a not-yet-created model class. Stands in as a placeholder for the related model of a foreign key. Useful for circular references.
+
+    .. code-block:: python
+
+        DeferredPost = DeferredRelation()
+
+        class User(Model):
+            username = CharField()
+
+            # `Post` is not available yet, it is declared below.
+            favorite_post = ForeignKeyField(DeferredPost, null=True)
+
+        class Post(Model):
+            # `Post` comes after `User` since it refers to `User`.
+            user = ForeignKeyField(User)
+            title = CharField()
+
+        DeferredPost.set_model(Post)  # Post is now available.
+
+    .. py:method:: set_model(model)
+
+        Replace the placeholder with the correct model class.
 
 .. py:class:: Proxy()
 
@@ -2113,6 +2853,34 @@ Misc
 
         Concatenate the current node with the provided ``rhs``.
 
+        .. warning::
+            In order for this method to work with MySQL, the MySQL session must
+            be set to use ``PIPES_AS_CONCAT``.
+
+            To reliably concatenate strings with MySQL, use
+            ``fn.CONCAT(s1, s2...)`` instead.
+
+    .. py:method:: is_null([is_null=True])
+
+        Create an expression testing whether the ``Node`` is (or is not) ``NULL``.
+
+        .. code-block:: python
+
+            # Find all categories whose parent column is NULL.
+            root_nodes = Category.select().where(Category.parent.is_null())
+
+            # Find all categores whose parent is NOT NULL.
+            child_nodes = Category.select().where(Category.parent.is_null(False))
+
+        To simplify things, peewee will generate the correct SQL for equality and inequality. The :py:meth:`~Node.is_null` method is provided simply for readability.
+
+        .. code-block:: python
+
+            # Equivalent to the previous queries -- peewee will translate these
+            # into `IS NULL` and `IS NOT NULL`:
+            root_nodes = Category.select().where(Category.parent == None)
+            child_nodes = Category.select().where(Category.parent != None)
+
     .. py:method:: __invert__()
 
         Negate the node. This translates roughly into *NOT (<node>)*.
@@ -2128,3 +2896,36 @@ Misc
     .. py:method:: desc()
 
         Apply descending ordering to the given node. This translates into *<node> DESC*.
+
+    .. py:method:: bind_to(model_class)
+
+        Bind the results of an expression to a specific model type. Useful when adding expressions to a select, where the result of the expression should be placed on a particular joined instance.
+
+    .. py:classmethod:: extend([name=None[, clone=False]])
+
+        Decorator for adding the decorated function as a new method on :py:class:`Node` and its subclasses. Useful for adding implementation-specific features to all node types.
+
+        :param str name: Method name. If not provided the name of the wrapped function will be used.
+        :param bool clone: Whether this method should return a clone. This is generally true when the method mutates the internal state of the node.
+
+        Example:
+
+        .. code-block:: python
+
+            # Add a `cast()` method to all nodes using the '::' operator.
+            PostgresqlDatabase.register_ops({'::', '::'})
+
+            @Node.extend()
+            def cast(self, as_type):
+                return Expression(self, '::', SQL(as_type))
+
+            # Let's pretend we want to find all data points whose numbers
+            # are palindromes. Note that we can use the new *cast* method
+            # on both fields and with the `fn` helper:
+            reverse_val = fn.REVERSE(DataModel.value.cast('str')).cast('int')
+
+            query = (DataPoint
+                     .select()
+                     .where(DataPoint.value == reverse_val))
+
+        .. note:: To remove an extended method, simply call ``delattr`` on the class the method was originally added to.
